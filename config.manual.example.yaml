@@ -1,0 +1,26 @@
+# Copy this outside the new instance directory and replace the callback URL.
+# Put callback credentials into INSTANCE/secrets/ before running up.
+storage:
+  backend: sqlite
+  sqlite:
+    path: data/cosigner.db
+  encryption:
+    kek:
+      type: password_envelope
+      config:
+        path: /run/secrets/storage-kek.enc
+approval:
+  require_callback: true
+audit:
+  type: file
+  config:
+    path: /var/lib/cosigner/audit.jsonl
+callback:
+  url: https://YOUR-CALLBACK-HOST/cosigner/approve
+  timeout: 30s
+  retry_count: 1
+  private_key:
+    type: file
+    config:
+      path: /run/secrets/callback-private.hex
+  response_public_key_path: /run/secrets/callback-response.pub.pem

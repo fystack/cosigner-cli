@@ -1,0 +1,46 @@
+services:
+  cosigner:
+    image: "${COSIGNER_IMAGE:?run through cosigner-cli}"
+    platform: "${COSIGNER_PLATFORM:?run through cosigner-cli}"
+    user: "${COSIGNER_UID:?run through cosigner-cli}:${COSIGNER_GID:?run through cosigner-cli}"
+    init: true
+    restart: "${COSIGNER_RESTART:-no}"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/cosigner:mode=0700,uid=${COSIGNER_UID},gid=${COSIGNER_GID}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: [CMD, /cosigner, health, --json]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5m
+    stop_grace_period: 35s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      COSIGNER_HEALTH_PATH: /run/cosigner/health.json
+      APEX_ENDPOINT: "${COSIGNER_APEX_ENDPOINT:-}"
+      GATEWAY_ENDPOINT: "${COSIGNER_GATEWAY_ENDPOINT:-}"
+      COSIGNER_UNLOCK_PORT: "${COSIGNER_UNLOCK_PORT:?run through cosigner-cli}"
+      COSIGNER_UNLOCK_TOKEN: "${COSIGNER_UNLOCK_TOKEN:?run through cosigner-cli}"
+    working_dir: /var/lib/cosigner
+    volumes:
+      - type: bind
+        source: "${COSIGNER_STATE_DIR:?run through cosigner-cli}"
+        target: /var/lib/cosigner
+      - type: bind
+        source: "${COSIGNER_CONFIG:?run through cosigner-cli}"
+        target: /var/lib/cosigner/config.yaml
+        read_only: true
+      - type: bind
+        source: "${COSIGNER_SECRETS_DIR:?run through cosigner-cli}"
+        target: /run/secrets
+        read_only: true
+    command: [run, --mode=regular, --config=/var/lib/cosigner/config.yaml]

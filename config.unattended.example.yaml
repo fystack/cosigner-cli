@@ -1,0 +1,29 @@
+# The Linux container must obtain short-lived AWS role credentials and reach KMS.
+# storage-kek.kms contains base64 AWS KMS ciphertext for a random 32-byte key.
+storage:
+  backend: sqlite
+  sqlite:
+    path: data/cosigner.db
+  encryption:
+    kek:
+      type: kms
+      config:
+        provider: aws
+        region: YOUR-AWS-REGION
+        key_id: YOUR-KMS-KEY-ARN
+        ciphertext_blob_path: /run/secrets/storage-kek.kms
+approval:
+  require_callback: true
+audit:
+  type: file
+  config:
+    path: /var/lib/cosigner/audit.jsonl
+callback:
+  url: https://YOUR-CALLBACK-HOST/cosigner/approve
+  timeout: 30s
+  retry_count: 1
+  private_key:
+    type: file
+    config:
+      path: /run/secrets/callback-private.hex
+  response_public_key_path: /run/secrets/callback-response.pub.pem
