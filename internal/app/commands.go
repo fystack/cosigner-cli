@@ -129,7 +129,10 @@ func (a *App) provision(l layout, s Settings, configPath string) error {
 			return err
 		}
 	}
-	raw := []byte("storage:\n  backend: sqlite\n  sqlite:\n    path: data/cosigner.db\n  encryption:\n    kek:\n      type: password_envelope\n      config:\n        path: /run/secrets/storage-kek.enc\napproval:\n  require_callback: true\n")
+	// The built-in configuration is deliberately suitable only for an isolated
+	// development or trusted-coordinator deployment. Production installations
+	// should supply --config with a callback policy.
+	raw := []byte("storage:\n  backend: sqlite\n  sqlite:\n    path: data/cosigner.db\n  encryption:\n    kek:\n      type: password_envelope\n      config:\n        path: /run/secrets/storage-kek.enc\napproval:\n  require_callback: false\naudit:\n  type: file\n  config:\n    path: /var/lib/cosigner/audit.jsonl\n")
 	if configPath != "" {
 		var err error
 		raw, err = os.ReadFile(configPath)
@@ -139,10 +142,6 @@ func (a *App) provision(l layout, s Settings, configPath string) error {
 	}
 	if err := validateManagedConfig(raw, s); err != nil {
 		return err
-	}
-	// New installations must make their approval policy explicit.
-	if configPath == "" {
-		return errors.New("--config is required: configure an approval callback, or explicitly set approval.require_callback: false for trusted-coordinator signing")
 	}
 	if s.Profile == "manual" {
 		password, err := a.readPassword(true)

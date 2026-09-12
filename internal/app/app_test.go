@@ -28,6 +28,21 @@ const testImage = "fystacklabs/cosigner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 const testConfig = "storage:\n  backend: sqlite\n  sqlite:\n    path: data/cosigner.db\n  encryption:\n    kek:\n      type: password_envelope\n      config:\n        path: /run/secrets/storage-kek.enc\napproval:\n  require_callback: false\naudit:\n  type: file\n  config:\n    path: audit.jsonl\n"
 
+func TestProvisionWithoutConfigCreatesValidDevelopmentConfig(t *testing.T) {
+	r := &fakeRunner{}
+	a := newTestApp(r)
+	a.password = []byte("test-password")
+	l := a.layout(t.TempDir())
+	s := Settings{Profile: "manual"}
+
+	require.NoError(t, a.provision(l, s, ""))
+	raw, err := os.ReadFile(l.config)
+	require.NoError(t, err)
+	require.NoError(t, validateManagedConfig(raw, s))
+	require.Contains(t, string(raw), "require_callback: false")
+	require.Contains(t, string(raw), "type: file")
+}
+
 type runCall struct {
 	name  string
 	args  []string
@@ -367,6 +382,61 @@ func TestUpdateDryRunVerifiesWithoutChangingInstallation(t *testing.T) {
 	after, err := loadSettings(l.home)
 	require.NoError(t, err)
 	require.Equal(t, s, after)
+}
+
+func TestUpdateStaysOnTheInstalledRegistryUnlessOverridden(t *testing.T) {
+	for _, tc := range []struct {
+		installed, override, want string
+	}{
+		{installed: testImage, want: "fystacklabs/cosigner:1.2.4"},
+		{installed: "ghcr.io/fystack/cosigner@sha256:" + strings.Repeat("a", 64), want: "ghcr.io/fystack/cosigner:1.2.4"},
+		{installed: testImage, override: "ghcr.io/fystack/cosigner", want: "ghcr.io/fystack/cosigner:1.2.4"},
+		{installed: testImage, override: "registry.example.com:5000/fystack/cosigner", want: "registry.example.com:5000/fystack/cosigner:1.2.4"},
+	} {
+		r := &fakeRunner{}
+		a := newTestApp(r)
+		l, s := fixture(t, a)
+		s.Image = tc.installed
+		require.NoError(t, saveSettings(l.home, s))
+		var pulled string
+		r.run = func(c runCall) ([]byte, error) {
+			switch {
+			case c.name == "cosign":
+				return []byte("verified"), nil
+			case c.args[0] == "pull":
+				pulled = c.args[1]
+				return nil, nil
+			case c.args[0] == "image":
+				repository := pulled[:strings.LastIndex(pulled, ":")]
+				raw, _ := json.Marshal([]string{repository + "@sha256:" + strings.Repeat("b", 64)})
+				return raw, nil
+			case c.args[len(c.args)-1] == "capabilities":
+				return []byte(`{"operator_api":2,"unlock_protocol":2,"storage_schema":1,"version":"1.2.4"}`), nil
+			}
+			t.Fatalf("unexpected state-changing command: %v", c.args)
+			return nil, nil
+		}
+		cmd := a.Command()
+		args := []string{"--home", l.home, "update", "--version", "1.2.4", "--dry-run"}
+		if tc.override != "" {
+			args = append(args, "--repository", tc.override)
+		}
+		cmd.SetArgs(args)
+		require.NoError(t, cmd.Execute())
+		require.Equal(t, tc.want, pulled)
+	}
+}
+
+func TestUpdateRejectsRepositoryWithTagOrDigest(t *testing.T) {
+	r := &fakeRunner{}
+	a := newTestApp(r)
+	l, _ := fixture(t, a)
+	for _, repository := range []string{"fystacklabs/cosigner:1.2.4", "fystacklabs/cosigner@sha256:" + strings.Repeat("a", 64), "ghcr.io/fystack/cosigner:latest", "localhost:5000"} {
+		cmd := a.Command()
+		cmd.SetArgs([]string{"--home", l.home, "update", "--version", "1.2.4", "--repository", repository, "--dry-run"})
+		require.ErrorContains(t, cmd.Execute(), "is not an image repository")
+	}
+	require.Empty(t, r.calls)
 }
 
 func TestUpdateRejectsDowngradesBeforeDocker(t *testing.T) {

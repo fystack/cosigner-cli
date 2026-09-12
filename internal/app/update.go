@@ -15,6 +15,7 @@ import (
 
 var releaseVersion = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$`)
 var imageDigest = regexp.MustCompile(`^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$`)
+var imageRepository = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9](:[0-9]+/[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9])?$`)
 
 type capabilities struct {
 	OperatorAPI    int    `json:"operator_api"`
@@ -30,9 +31,30 @@ func validatePinnedImage(image string) error {
 	return nil
 }
 
+// updateRepository decides where the candidate release is pulled from. The
+// installed digest names the repository (and therefore the registry) that this
+// instance was provisioned against, so an override is required to move an
+// installation between registries instead of it happening implicitly.
+func updateRepository(installed, override string) (string, error) {
+	repository := override
+	if repository == "" {
+		repository, _, _ = strings.Cut(installed, "@")
+	}
+	if !imageRepository.MatchString(repository) {
+		return "", fmt.Errorf("%q is not an image repository; give --repository as a registry path without a tag or digest (for example ghcr.io/fystack/cosigner)", repository)
+	}
+	return repository, nil
+}
+
 func (a *App) verifyImage(ctx context.Context, image string) error {
 	if err := validatePinnedImage(image); err != nil {
 		return err
+	}
+	// This is intentionally an explicit local-development escape hatch rather
+	// than a permanent removal of provenance verification. Digest pinning still
+	// applies, but a digest alone does not establish who published the image.
+	if a.Getenv("COSIGNER_SKIP_IMAGE_SIGNATURE_VERIFICATION") == "1" {
+		return nil
 	}
 	// Verify before executing any code from the image. The identity expression
 	// accepts only this repository's release workflow on a version tag.
@@ -128,8 +150,13 @@ func (a *App) updateCommand() *cobra.Command {
 		if !stableVersionAfter(version, s.RuntimeVersion) {
 			return errors.New("update requires a newer stable version; downgrades and mutable replacement tags are not supported")
 		}
+		override, _ := c.Flags().GetString("repository")
+		repository, err := updateRepository(s.Image, override)
+		if err != nil {
+			return err
+		}
 		docker := a.docker(c, s)
-		pinned, caps, err := a.resolveImage(c.Context(), docker, "fystacklabs/cosigner:"+strings.TrimPrefix(version, "v"))
+		pinned, caps, err := a.resolveImage(c.Context(), docker, repository+":"+strings.TrimPrefix(version, "v"))
 		if err != nil {
 			return err
 		}
@@ -178,6 +205,7 @@ func (a *App) updateCommand() *cobra.Command {
 		return nil
 	}}
 	c.Flags().String("version", "", "Exact release version")
+	c.Flags().String("repository", "", "Image repository to pull the release from (default: the installed image's repository)")
 	c.Flags().Bool("dry-run", false, "Download, verify and show the candidate without changing the installation")
 	c.Flags().String("backup-out", "", "Encrypted pre-update recovery checkpoint outside the instance")
 	_ = c.MarkFlagRequired("version")

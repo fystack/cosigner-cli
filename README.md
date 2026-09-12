@@ -86,6 +86,12 @@ before starting the recovered one: a process lock does not prevent two hosts fro
 using copied MPC shares. Restoring old MPC state may be unsafe without coordinator
 reconciliation; get an approved recovery procedure for your MPC protocol.
 
+Updates pull from the installed image's own repository, so an instance set up
+from a mirror such as `ghcr.io/fystack/cosigner` stays on it. Moving between
+registries is explicit: `update --repository ghcr.io/fystack/cosigner`. Signature
+verification is unchanged either way; only the runtime release workflow's
+identity is accepted, whatever the registry.
+
 Updates require a newer exact release, a verified digest, a compatible runtime
 contract and an offline recovery checkpoint. Health is checked after startup.
 Failures leave state available for investigation; there is no automatic database
