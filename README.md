@@ -8,12 +8,33 @@ instance. Nitro deployments remain in the runtime repository.
 
 ## Install and configure
 
-Requires Docker Engine with Compose v2 and Cosign. Build with `make build`, or,
+Requires Docker Engine with Compose v2 and [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
+which verifies the CLI download and every runtime image before it runs. Install
+Cosign first:
+
+```bash
+brew install cosign                      # macOS
+go install github.com/sigstore/cosign/v3/cmd/cosign@latest   # any OS with Go
+# Linux packages and release binaries: https://docs.sigstore.dev/cosign/system_config/installation/
+cosign version
+```
+
+`up`, `update` and `doctor` stop before any prompt or download if Cosign is
+missing; `start`, `restart` and `status` don't need it.
+
+Build with `make build`, or,
 after a signed CLI release is published, run
 `bash scripts/install.sh vX.Y.Z /absolute/new/bin-directory`.
 CLI and runtime versions are independent. Installer verifies the CLI publisher;
 the CLI verifies runtime images against the runtime release workflow before
-executing them. No unsigned-image bypass or implicit/latest image is supported.
+executing them. No unsigned-image bypass or floating `latest` tag is supported.
+
+Without `--image`, first `up` picks the newest stable `X.Y.Z` tag in
+`ghcr.io/fystack/cosigner`, verifies its signature and runtime contract, and pins
+its digest. Signatures are checked when a digest is installed (`up`, `update`)
+and by `doctor`; `start`/`restart` reuse the pinned digest without network
+access to Sigstore. `start`, `restart`, `status` and `doctor` print a notice when
+a newer release exists (set `COSIGNER_NO_UPDATE_CHECK=1` to disable).
 
 Copy `config.manual.example.yaml` to a file outside your new instance directory.
 Replace callback endpoints and provide its credentials under
@@ -22,7 +43,6 @@ Example versions below are placeholders, not claims of available releases.
 
 ```bash
 cosigner-cli --home /srv/cosigner up \
-  --image fystacklabs/cosigner:X.Y.Z \
   --apex-endpoint https://YOUR-APEX-HOST \
   --config /secure/config.manual.yaml --profile manual
 cosigner-cli --home /srv/cosigner status
@@ -34,7 +54,8 @@ to the pairing container over stdin, not persisted. Repeating `up` preserves
 identity and database; running instances are left alone. Conflicting containers,
 missing pairing metadata with existing data, and concurrent mutating commands
 fail closed. Registration conflicts never trigger automatic key rotation.
-Use `update` for image changes, not `up --image`.
+Use `update` for image changes, not `up --image`; `--image` (tag or digest) only
+selects the release for a first setup.
 
 ## Passwords and restarts
 
@@ -64,9 +85,10 @@ cosigner-cli --home /srv/cosigner stop
 cosigner-cli --home /srv/cosigner backup --out /secure/backups/cosigner.enc
 cosigner-cli --home /srv/cosigner start
 
-cosigner-cli --home /srv/cosigner update --version vX.Y.Z --dry-run
-cosigner-cli --home /srv/cosigner update --version vX.Y.Z \
+cosigner-cli --home /srv/cosigner update --dry-run
+cosigner-cli --home /srv/cosigner update \
   --backup-out /secure/backups/pre-update.enc
+# or pin an exact release: update --version vX.Y.Z --backup-out ...
 
 cosigner-cli --home /srv/recovered-cosigner restore \
   --in /secure/backups/cosigner.enc
@@ -92,7 +114,7 @@ registries is explicit: `update --repository ghcr.io/fystack/cosigner`. Signatur
 verification is unchanged either way; only the runtime release workflow's
 identity is accepted, whatever the registry.
 
-Updates require a newer exact release, a verified digest, a compatible runtime
+Updates use the newest stable release unless `--version` is given, and require a newer release, a verified digest, a compatible runtime
 contract and an offline recovery checkpoint. Health is checked after startup.
 Failures leave state available for investigation; there is no automatic database
 rollback or downgrade. Do not restore a checkpoint after new signing activity

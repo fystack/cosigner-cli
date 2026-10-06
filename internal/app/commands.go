@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -19,13 +20,20 @@ import (
 )
 
 func (a *App) setupCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "up", Short: "Provision once, or start the installed instance", RunE: a.setup}
-	cmd.Flags().String("apex-endpoint", DefaultApexEndpoint, "Apex HTTPS endpoint")
-	cmd.Flags().String("image", "", "Release image tag or digest (required for first setup)")
-	cmd.Flags().String("token-file", "", "Pairing token file; - reads stdin")
+	cmd := &cobra.Command{
+		Use:   "up",
+		Short: "Provision and start Cosigner",
+		PreRun: func(_ *cobra.Command, _ []string) {
+			a.printBanner()
+		},
+		RunE: a.setup,
+	}
+	cmd.Flags().String("apex-endpoint", "", "Apex HTTPS endpoint")
+	cmd.Flags().String("image", "", "Cosigner release image tag or digest (default: newest signed release)")
+	cmd.Flags().String("token-file", "", "Read pairing token from a file; use - for stdin")
 	cmd.Flags().String("config", "", "Runtime configuration to copy into a new instance")
 	cmd.Flags().String("profile", "manual", "manual or unattended (KMS storage key)")
-	cmd.Flags().Bool("allow-insecure-http", false, "Allow HTTP endpoint for isolated development")
+	cmd.Flags().Bool("allow-insecure-http", false, "Allow non-loopback HTTP Apex endpoint")
 	return cmd
 }
 func (a *App) setup(cmd *cobra.Command, _ []string) error {
@@ -44,6 +52,10 @@ func (a *App) setup(cmd *cobra.Command, _ []string) error {
 				return fmt.Errorf("up cannot modify a paired instance (%s); use its maintenance command", flag)
 			}
 		}
+		if err := a.preflight(cmd.Context(), a.docker(cmd, saved)); err != nil {
+			return err
+		}
+		fmt.Fprintln(a.Out, "Cosigner is already paired; starting the existing identity.")
 		return a.start(cmd, nil)
 	}
 	// Existing database state without pairing metadata is a recovery case.
@@ -52,14 +64,8 @@ func (a *App) setup(cmd *cobra.Command, _ []string) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	docker := a.docker(cmd, saved)
-	if err := a.dockerOK(cmd.Context(), docker); err != nil {
-		return err
-	}
-	if _, err := a.ownedContainers(cmd.Context(), docker, l, saved); err != nil {
-		return err
-	}
-	if !fileExists(filepath.Join(home, "cosigner-cli.yaml")) {
+	fresh := !fileExists(filepath.Join(home, "cosigner-cli.yaml"))
+	if fresh {
 		for _, path := range []string{l.config, l.pairing(), l.key(), l.pub(), l.encryptedKEK(), l.compose()} {
 			if _, err := os.Lstat(path); err == nil {
 				return fmt.Errorf("unmanaged file %s exists; use a new directory or restore", path)
@@ -72,21 +78,14 @@ func (a *App) setup(cmd *cobra.Command, _ []string) error {
 			return errors.New("profile must be manual or unattended")
 		}
 		saved.ApexEndpoint, _ = cmd.Flags().GetString("apex-endpoint")
+		saved.ApexEndpoint = strings.TrimRight(strings.TrimSpace(saved.ApexEndpoint), "/")
+		if saved.ApexEndpoint == "" {
+			if saved.ApexEndpoint, err = a.promptEndpoint(DefaultApexEndpoint); err != nil {
+				return err
+			}
+		}
 		insecure, _ := cmd.Flags().GetBool("allow-insecure-http")
 		if err := endpointAllowed(saved.ApexEndpoint, insecure); err != nil {
-			return err
-		}
-		image, _ := cmd.Flags().GetString("image")
-		pinned, caps, err := a.resolveImage(cmd.Context(), docker, image)
-		if err != nil {
-			return err
-		}
-		saved.Image, saved.RuntimeVersion, saved.Docker = pinned, caps.Version, docker
-		input, _ := cmd.Flags().GetString("config")
-		if err := a.provision(l, saved, input); err != nil {
-			return err
-		}
-		if err := saveSettings(home, saved); err != nil {
 			return err
 		}
 	} else {
@@ -96,29 +95,114 @@ func (a *App) setup(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
+	docker := a.docker(cmd, saved)
+	if err := a.preflight(cmd.Context(), docker); err != nil {
+		return err
+	}
+	if _, err := a.ownedContainers(cmd.Context(), docker, l, saved); err != nil {
+		return err
+	}
+	if fresh {
+		if err := a.cosignOK(cmd.Context()); err != nil {
+			return err
+		}
+	}
+	image, _ := cmd.Flags().GetString("image")
+	if fresh && image == "" {
+		err := a.step("Finding the newest Cosigner release", func() (string, error) {
+			version, err := a.newestRelease(cmd.Context(), defaultRepository)
+			image = defaultRepository + ":" + strings.TrimPrefix(version, "v")
+			return "Newest release: v" + strings.TrimPrefix(version, "v") + " (" + image + ")", err
+		})
+		if err != nil {
+			return err
+		}
+	}
+	// Pull and verify before asking for secrets, so operators know the image
+	// is trustworthy before they type a password or pairing token.
+	if fresh {
+		a.progress("Pulling Cosigner image " + image + "…")
+		pinned, caps, err := a.resolveImage(cmd.Context(), docker, image)
+		if err != nil {
+			return err
+		}
+		a.success("Cosigner " + caps.Version + " pinned to " + pinned)
+		saved.Image, saved.RuntimeVersion, saved.Docker = pinned, caps.Version, docker
+	}
+	if saved.Profile == "manual" {
+		a.progress("Unlocking encrypted local storage…")
+		// Cached on the App, so provisioning and startup reuse this entry.
+		password, err := a.readPassword(fresh)
+		if err != nil {
+			return err
+		}
+		clear(password)
+	}
+	a.progress("Reading pairing token…")
 	tokenFile, _ := cmd.Flags().GetString("token-file")
 	token, err := a.readToken(tokenFile)
 	if err != nil {
 		return err
 	}
 	defer clear(token)
+	if fresh {
+		input, _ := cmd.Flags().GetString("config")
+		if err := a.provision(l, saved, input); err != nil {
+			return err
+		}
+		if err := saveSettings(home, saved); err != nil {
+			return err
+		}
+	}
 	args, err := a.runtimeArgs(l, saved)
 	if err != nil {
 		return err
 	}
 	args = append(args, "-i", saved.Image, "pair", "--mode=regular", "--connect=false", "--config=/var/lib/cosigner/config.yaml", "--out=/var/lib/cosigner", "--token-file=-", "--apex-endpoint="+containerEndpoint(saved.ApexEndpoint))
-	a.progress("Pairing the existing local identity with Apex…")
-	raw, err := a.Runner.Run(cmd.Context(), docker, args, bytes.NewReader(token), nil)
+	a.progress("Pairing identity with Apex; this may take a minute…")
+	var raw bytes.Buffer
+	logs := a.logWriter(token)
+	err = a.Runner.Stream(cmd.Context(), docker, args, bytes.NewReader(token), nil, io.MultiWriter(&raw, logs))
+	logs.Flush()
 	if err != nil {
-		if bytes.Contains(raw, []byte("cosigner_public_key_already_registered")) {
+		if bytes.Contains(raw.Bytes(), []byte("cosigner_public_key_already_registered")) {
 			return errors.New("identity already registered; restore pairing metadata; no identity was rotated")
 		}
-		return fmt.Errorf("pairing failed: %w: %s", err, strings.ReplaceAll(string(raw), string(token), "[REDACTED]"))
+		return fmt.Errorf("pairing failed: %w", err)
 	}
 	if err := validatePaired(l, saved); err != nil {
 		return err
 	}
+	a.success("Paired with Apex")
 	return a.start(cmd, nil)
+}
+
+func (a *App) preflight(ctx context.Context, docker string) error {
+	if err := a.step("Checking Docker and Docker Compose", func() (string, error) { return "", a.dockerOK(ctx, docker) }); err != nil {
+		return err
+	}
+	return a.step("Checking host platform", func() (string, error) {
+		platform, err := a.platform()
+		return "Host platform: " + platform, err
+	})
+}
+
+// promptEndpoint lets an interactive operator review the Apex endpoint on a
+// fresh setup; non-interactive runs keep the default.
+func (a *App) promptEndpoint(defaultValue string) (string, error) {
+	file, ok := a.In.(*os.File)
+	if !ok || !isTerminal(file) {
+		return defaultValue, nil
+	}
+	fmt.Fprintf(a.Out, "Fystack Endpoint (Optional) [%s]: ", defaultValue)
+	value, err := bufio.NewReader(file).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read Apex endpoint: %w", err)
+	}
+	if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
+		return value, nil
+	}
+	return defaultValue, nil
 }
 func (a *App) provision(l layout, s Settings, configPath string) error {
 	for _, dir := range []string{l.state, filepath.Join(l.home, "secrets")} {
@@ -225,7 +309,7 @@ func (a *App) readToken(path string) ([]byte, error) {
 	if path == "" {
 		f, ok := a.In.(*os.File)
 		if !ok || !isTerminal(f) {
-			return nil, errors.New("--token-file is required in non-interactive mode")
+			return nil, errors.New("pairing token is required in non-interactive mode; pass --token-file=-")
 		}
 		fmt.Fprint(a.Out, "Pairing token: ")
 		raw, err := readHidden(f)
@@ -234,11 +318,12 @@ func (a *App) readToken(path string) ([]byte, error) {
 			clear(raw)
 			return nil, err
 		}
-		if len(raw) == 0 || len(raw) > defaultTokenMax {
-			clear(raw)
-			return nil, errors.New("invalid pairing token length")
+		token := append([]byte(nil), bytes.TrimSpace(raw)...)
+		clear(raw)
+		if err := tokenLength(token); err != nil {
+			return nil, err
 		}
-		return raw, nil
+		return token, nil
 	}
 	if path != "-" {
 		f, err := os.Open(path)
@@ -253,14 +338,26 @@ func (a *App) readToken(path string) ([]byte, error) {
 		clear(raw)
 		return nil, err
 	}
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || len(raw) > defaultTokenMax {
+	if len(raw) > defaultTokenMax {
 		clear(raw)
-		return nil, errors.New("invalid pairing token length")
+		return nil, errors.New("pairing token is too large")
 	}
-	token := append([]byte(nil), trimmed...)
+	token := append([]byte(nil), bytes.TrimSpace(raw)...)
 	clear(raw)
+	if err := tokenLength(token); err != nil {
+		return nil, err
+	}
 	return token, nil
+}
+func tokenLength(token []byte) error {
+	if len(token) == 0 {
+		return errors.New("pairing token is required")
+	}
+	if len(token) > defaultTokenMax {
+		clear(token)
+		return errors.New("pairing token is too large")
+	}
+	return nil
 }
 func validatePaired(l layout, s Settings) error {
 	for _, path := range []string{l.config, l.compose(), l.pairing(), l.key(), l.pub()} {
@@ -307,7 +404,7 @@ func (a *App) installation(cmd *cobra.Command) (layout, Settings, error) {
 	return l, s, validatePaired(l, s)
 }
 func (a *App) startCommand() *cobra.Command {
-	return &cobra.Command{Use: "start", Short: "Start the installed image", RunE: a.start}
+	return &cobra.Command{Use: "start", Short: "Start an existing paired Cosigner", RunE: a.start}
 }
 func (a *App) start(cmd *cobra.Command, _ []string) error {
 	l, s, err := a.installation(cmd)
@@ -320,20 +417,25 @@ func (a *App) start(cmd *cobra.Command, _ []string) error {
 	}
 	if running {
 		a.progress("Cosigner is already running; no changes made.")
-		return nil
+	} else if err := a.startService(cmd.Context(), a.docker(cmd, s), l, s, false); err != nil {
+		return err
 	}
-	return a.startService(cmd.Context(), a.docker(cmd, s), l, s, false)
+	a.notifyUpdate(cmd.Context(), s)
+	return nil
 }
 func (a *App) startService(ctx context.Context, docker string, l layout, s Settings, recreate bool) error {
 	if err := a.dockerOK(ctx, docker); err != nil {
 		return err
 	}
 	if _, err := a.Runner.Run(ctx, docker, []string{"image", "inspect", s.Image}, nil, nil); err != nil {
+		a.progress("Pulling Cosigner image " + s.Image + "…")
 		if err := a.Runner.Stream(ctx, docker, []string{"pull", s.Image}, nil, nil, a.Out); err != nil {
 			return err
 		}
 	}
-	if _, err := a.inspectCapabilities(ctx, docker, s.Image); err != nil {
+	// The digest was signature-verified when it was installed and is content
+	// addressed, so startup only rechecks the runtime contract (offline).
+	if _, err := a.runtimeCapabilities(ctx, docker, s.Image); err != nil {
 		return err
 	}
 	port, token := "0", "unused"
@@ -368,33 +470,68 @@ func (a *App) startService(ctx context.Context, docker string, l layout, s Setti
 		args = append(args, "--force-recreate")
 	}
 	args = append(args, "cosigner")
+	a.progress("Starting Cosigner container…")
 	if err := a.composeStream(ctx, docker, l, s, port, token, args...); err != nil {
-		return err
+		return fmt.Errorf("start Cosigner: %w", err)
 	}
 	if unlock != nil {
-		unlockCtx, cancel := context.WithTimeout(ctx, time.Minute)
-		err := unlock.wait(unlockCtx)
-		cancel()
+		err := a.step("Unlocking storage inside Cosigner", func() (string, error) {
+			unlockCtx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			return "Storage unlocked", unlock.wait(unlockCtx)
+		})
 		if err != nil {
+			a.dumpContainerLogs(ctx, docker, l, s)
 			return fmt.Errorf("storage unlock failed; inspect logs and restart explicitly: %w", err)
 		}
 	}
-	if err := a.waitReady(ctx, docker, l, s); err != nil {
+	if err := a.step("Waiting for Cosigner to become ready", func() (string, error) {
+		return "Cosigner " + s.RuntimeVersion + " is running", a.waitReady(ctx, docker, l, s)
+	}); err != nil {
+		a.dumpContainerLogs(ctx, docker, l, s)
 		return err
 	}
-	a.progress("Cosigner is ready.")
+	a.showRecentLogs(ctx, docker, l, s)
 	return nil
 }
+
+// showRecentLogs gives operators a glimpse of a healthy startup; failures to
+// read logs are ignored because the service is already up.
+func (a *App) showRecentLogs(ctx context.Context, docker string, l layout, s Settings) {
+	raw, err := a.compose(ctx, docker, l, s, "0", "unused", "logs", "--tail", "20", "--no-color", "--no-log-prefix", "cosigner")
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+		return
+	}
+	a.progress("Recent Cosigner logs (follow with `cosigner-cli logs -f`):")
+	logs := a.logWriter(nil)
+	logs.Write(raw)
+	logs.Flush()
+}
+
+// dumpContainerLogs shows why a startup failed without a separate `logs` run.
+func (a *App) dumpContainerLogs(ctx context.Context, docker string, l layout, s Settings) {
+	raw, err := a.compose(ctx, docker, l, s, "0", "unused", "logs", "--tail", "100", "--no-color", "cosigner")
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+		fmt.Fprintln(a.Err, "==> Could not read Cosigner container logs; run `cosigner-cli logs` to see the failure.")
+		return
+	}
+	fmt.Fprintln(a.Err, "==> Recent Cosigner container logs:")
+	fmt.Fprint(a.Err, string(raw))
+}
 func (a *App) stopCommand() *cobra.Command {
-	return &cobra.Command{Use: "stop", Short: "Stop without deleting state", RunE: func(c *cobra.Command, _ []string) error { return a.lifecycle(c, "stop", "cosigner") }}
+	return &cobra.Command{Use: "stop", Short: "Stop Cosigner without deleting state", RunE: func(c *cobra.Command, _ []string) error { return a.lifecycle(c, "stop", "cosigner") }}
 }
 func (a *App) restartCommand() *cobra.Command {
-	return &cobra.Command{Use: "restart", Short: "Restart the installed image", RunE: func(c *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "restart", Short: "Restart an existing paired Cosigner", RunE: func(c *cobra.Command, _ []string) error {
 		l, s, err := a.installation(c)
 		if err != nil {
 			return err
 		}
-		return a.startService(c.Context(), a.docker(c, s), l, s, true)
+		if err := a.startService(c.Context(), a.docker(c, s), l, s, true); err != nil {
+			return err
+		}
+		a.notifyUpdate(c.Context(), s)
+		return nil
 	}}
 }
 func (a *App) lifecycle(cmd *cobra.Command, args ...string) error {
@@ -407,18 +544,22 @@ func (a *App) lifecycle(cmd *cobra.Command, args ...string) error {
 	return err
 }
 func (a *App) statusCommand() *cobra.Command {
-	return &cobra.Command{Use: "status", Short: "Show runtime readiness", RunE: func(c *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "status", Short: "Show Cosigner runtime status", RunE: func(c *cobra.Command, _ []string) error {
 		l, s, err := a.installation(c)
 		if err != nil {
 			return err
 		}
 		raw, err := a.compose(c.Context(), a.docker(c, s), l, s, "0", "unused", "exec", "-T", "cosigner", "/cosigner", "health", "--json")
 		fmt.Fprint(a.Out, string(raw))
-		return err
+		if err != nil {
+			return err
+		}
+		a.notifyUpdate(c.Context(), s)
+		return nil
 	}}
 }
 func (a *App) logsCommand() *cobra.Command {
-	c := &cobra.Command{Use: "logs", Short: "Show container logs", RunE: func(c *cobra.Command, _ []string) error {
+	c := &cobra.Command{Use: "logs", Short: "Show Cosigner logs", RunE: func(c *cobra.Command, _ []string) error {
 		l, s, err := a.installation(c)
 		if err != nil {
 			return err
@@ -433,13 +574,18 @@ func (a *App) logsCommand() *cobra.Command {
 		}
 		return a.composeStream(c.Context(), a.docker(c, s), l, s, "0", "unused", append(args, "cosigner")...)
 	}}
-	c.Flags().Int("tail", 200, "Log lines")
+	c.Flags().Int("tail", 200, "Number of log lines")
 	c.Flags().BoolP("follow", "f", false, "Follow logs")
 	return c
 }
 func (a *App) doctorCommand() *cobra.Command {
-	return &cobra.Command{Use: "doctor", Short: "Validate installation and runtime compatibility", RunE: func(c *cobra.Command, _ []string) error {
-		l, s, err := a.installation(c)
+	return &cobra.Command{Use: "doctor", Short: "Check Docker, configuration, and installation state", RunE: func(c *cobra.Command, _ []string) error {
+		home, err := a.home(c)
+		if err != nil {
+			return err
+		}
+		l := a.layout(home)
+		s, err := loadSettings(home)
 		if err != nil {
 			return err
 		}
@@ -447,7 +593,21 @@ func (a *App) doctorCommand() *cobra.Command {
 		if err := a.dockerOK(c.Context(), docker); err != nil {
 			return err
 		}
+		if !fileExists(l.config) {
+			fmt.Fprintln(a.Out, "State: unconfigured")
+			return nil
+		}
+		if !fileExists(l.pairing()) {
+			fmt.Fprintln(a.Out, "State: configured but unpaired")
+			return nil
+		}
+		if err := validatePaired(l, s); err != nil {
+			return err
+		}
 		if _, err := a.ownedContainers(c.Context(), docker, l, s); err != nil {
+			return err
+		}
+		if err := a.cosignOK(c.Context()); err != nil {
 			return err
 		}
 		caps, err := a.inspectCapabilities(c.Context(), docker, s.Image)
@@ -455,11 +615,13 @@ func (a *App) doctorCommand() *cobra.Command {
 			return err
 		}
 		fmt.Fprintf(a.Out, "profile: %s\nimage: %s\nruntime_version: %s\n", s.Profile, s.Image, caps.Version)
+		fmt.Fprintln(a.Out, "State: paired (run `cosigner-cli status` for container state)")
+		a.notifyUpdate(c.Context(), s)
 		return nil
 	}}
 }
 func (a *App) infoCommand() *cobra.Command {
-	return &cobra.Command{Use: "info", Short: "Show public identity and installed version", RunE: func(c *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "info", Short: "Print public Cosigner identity", RunE: func(c *cobra.Command, _ []string) error {
 		l, s, err := a.installation(c)
 		if err != nil {
 			return err
@@ -507,8 +669,8 @@ func (a *App) waitReady(ctx context.Context, docker string, l layout, s Settings
 	}
 }
 func (a *App) versionCommand() *cobra.Command {
-	return &cobra.Command{Use: "version", Short: "Print CLI build identity", RunE: func(*cobra.Command, []string) error {
-		fmt.Fprintf(a.Out, "cosigner-cli %s (commit %s), operator API 2\n", a.Version, a.Commit)
+	return &cobra.Command{Use: "version", Short: "Print host and runtime build identity", RunE: func(*cobra.Command, []string) error {
+		fmt.Fprintf(a.Out, "cosigner-cli %s (commit %s)\n", a.Version, a.Commit)
 		return nil
 	}}
 }

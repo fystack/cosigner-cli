@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -80,11 +81,12 @@ type App struct {
 	Getenv          func(string) string
 	Runner          Runner
 	Random          io.Reader
+	Tags            func(ctx context.Context, repository string) ([]string, error)
 	Version, Commit string
 }
 
 func New() *App {
-	return &App{In: os.Stdin, Out: os.Stdout, Err: os.Stderr, Getenv: os.Getenv, Runner: execRunner{}, Random: rand.Reader, Version: "dev", Commit: "dev"}
+	return &App{In: os.Stdin, Out: os.Stdout, Err: os.Stderr, Getenv: os.Getenv, Runner: execRunner{}, Random: rand.Reader, Tags: registryTags, Version: "dev", Commit: "dev"}
 }
 func (a *App) Command() *cobra.Command {
 	root := &cobra.Command{Use: "cosigner-cli", Short: "Manage a Cosigner installation", SilenceUsage: true, SilenceErrors: true}
@@ -107,6 +109,19 @@ func (a *App) Command() *cobra.Command {
 	return root
 }
 func (a *App) progress(message string) { fmt.Fprintln(a.Out, "==> "+message) }
+
+// printBanner is terminal-only so that scripts retain clean, parseable output.
+func (a *App) printBanner() {
+	file, ok := a.Out.(*os.File)
+	if !ok || !isTerminal(file) {
+		return
+	}
+	const cyan = "\x1b[38;5;45m"
+	const bold = "\x1b[1m"
+	const reset = "\x1b[0m"
+	fmt.Fprint(a.Out, cyan+bold+"\n"+banner+"\n"+reset)
+}
+
 func (a *App) home(cmd *cobra.Command) (string, error) {
 	home, _ := cmd.Flags().GetString("home")
 	if home == "" {
@@ -300,7 +315,7 @@ func (a *App) composeEnv(l layout, s Settings, port, token string) (map[string]s
 		restart = "on-failure:5"
 	}
 	return map[string]string{
-		"COSIGNER_IMAGE": s.Image, "COSIGNER_PLATFORM": platform,
+		"COSIGNER_IMAGE": taggedImage(s), "COSIGNER_PLATFORM": platform,
 		"COSIGNER_UID": strconv.Itoa(os.Getuid()), "COSIGNER_GID": strconv.Itoa(os.Getgid()),
 		"COSIGNER_STATE_DIR": l.state, "COSIGNER_CONFIG": l.config,
 		"COSIGNER_SECRETS_DIR": filepath.Join(l.home, "secrets"),
@@ -308,7 +323,18 @@ func (a *App) composeEnv(l layout, s Settings, port, token string) (map[string]s
 		"COSIGNER_APEX_ENDPOINT":    containerEndpoint(paired.Apex.Endpoint),
 		"COSIGNER_GATEWAY_ENDPOINT": containerEndpoint(paired.Gateway.Endpoint),
 		"COSIGNER_RESTART":          restart,
+		"COSIGNER_CONTAINER_NAME":   s.ProjectName,
 	}, nil
+}
+
+// taggedImage adds the release tag in front of the pinned digest so `docker ps`
+// shows the version; Docker ignores the tag when a digest is present.
+func taggedImage(s Settings) string {
+	repository, digest, ok := strings.Cut(s.Image, "@")
+	if !ok || !releaseVersion.MatchString(s.RuntimeVersion) {
+		return s.Image
+	}
+	return repository + ":" + strings.TrimPrefix(s.RuntimeVersion, "v") + "@" + digest
 }
 func (a *App) compose(ctx context.Context, docker string, l layout, s Settings, port, token string, args ...string) ([]byte, error) {
 	if _, err := a.ownedContainers(ctx, docker, l, s); err != nil {

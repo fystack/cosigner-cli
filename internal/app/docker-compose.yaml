@@ -1,6 +1,8 @@
 services:
   cosigner:
     image: "${COSIGNER_IMAGE:?run through cosigner-cli}"
+    # One runtime per instance, so no replica suffix; the project name is already unique per directory.
+    container_name: "${COSIGNER_CONTAINER_NAME:?run through cosigner-cli}"
     platform: "${COSIGNER_PLATFORM:?run through cosigner-cli}"
     user: "${COSIGNER_UID:?run through cosigner-cli}:${COSIGNER_GID:?run through cosigner-cli}"
     init: true

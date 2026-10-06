@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,20 +55,32 @@ func (a *App) verifyImage(ctx context.Context, image string) error {
 	// than a permanent removal of provenance verification. Digest pinning still
 	// applies, but a digest alone does not establish who published the image.
 	if a.Getenv("COSIGNER_SKIP_IMAGE_SIGNATURE_VERIFICATION") == "1" {
+		a.warn("Image signature verification skipped (COSIGNER_SKIP_IMAGE_SIGNATURE_VERIFICATION=1)")
 		return nil
 	}
 	// Verify before executing any code from the image. The identity expression
 	// accepts only this repository's release workflow on a version tag.
-	_, err := a.Runner.Run(ctx, "cosign", []string{"verify", "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", "--certificate-identity-regexp", `^https://github\.com/fystack/cosigner/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$`, image}, nil, nil)
+	var raw []byte
+	err := a.step("Verifying image signature with Cosign", func() (done string, err error) {
+		raw, err = a.Runner.Run(ctx, "cosign", []string{"verify", "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", "--certificate-identity-regexp", `^https://github\.com/fystack/cosigner/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$`, image}, nil, nil)
+		return "Image signature verified: signed by the fystack/cosigner GitHub release workflow", err
+	})
 	if err != nil {
-		return fmt.Errorf("image signature verification failed (cosign is required): %w", err)
+		return fmt.Errorf("image signature verification failed (cosign is required): %w: %s", err, bytes.TrimSpace(raw))
 	}
 	return nil
 }
 
 func (a *App) inspectCapabilities(ctx context.Context, docker, image string) (capabilities, error) {
-	var caps capabilities
 	if err := a.verifyImage(ctx, image); err != nil {
+		return capabilities{}, err
+	}
+	return a.runtimeCapabilities(ctx, docker, image)
+}
+
+func (a *App) runtimeCapabilities(ctx context.Context, docker, image string) (capabilities, error) {
+	var caps capabilities
+	if err := validatePinnedImage(image); err != nil {
 		return caps, err
 	}
 	raw, err := a.Runner.Run(ctx, docker, []string{"run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", image, "capabilities"}, nil, nil)
@@ -143,34 +156,49 @@ func (a *App) updateCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		override, _ := c.Flags().GetString("repository")
+		repository, err := updateRepository(s.Image, override)
+		if err != nil {
+			return err
+		}
 		version, _ := c.Flags().GetString("version")
+		if version == "" {
+			a.progress("Checking for the newest Cosigner release…")
+			if version, err = a.newestRelease(c.Context(), repository); err != nil {
+				return err
+			}
+			if !stableVersionAfter(version, s.RuntimeVersion) {
+				a.progress("Cosigner is up to date (v" + strings.TrimPrefix(s.RuntimeVersion, "v") + ").")
+				return nil
+			}
+		}
 		if !releaseVersion.MatchString(version) {
 			return errors.New("--version must be a release version")
 		}
 		if !stableVersionAfter(version, s.RuntimeVersion) {
 			return errors.New("update requires a newer stable version; downgrades and mutable replacement tags are not supported")
 		}
-		override, _ := c.Flags().GetString("repository")
-		repository, err := updateRepository(s.Image, override)
-		if err != nil {
+		dryRun, _ := c.Flags().GetBool("dry-run")
+		backupPath, _ := c.Flags().GetString("backup-out")
+		if !dryRun && backupPath == "" {
+			return errors.New("--backup-out outside the instance directory is required")
+		}
+		if err := a.cosignOK(c.Context()); err != nil {
 			return err
 		}
 		docker := a.docker(c, s)
+		a.progress("Pulling Cosigner image " + repository + ":" + strings.TrimPrefix(version, "v") + "…")
 		pinned, caps, err := a.resolveImage(c.Context(), docker, repository+":"+strings.TrimPrefix(version, "v"))
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Out, "Installed: %s (%s)\nCandidate: %s (%s)\nStorage schema: 1 (no migration)\n", s.RuntimeVersion, s.Image, caps.Version, pinned)
-		if dry, _ := c.Flags().GetBool("dry-run"); dry {
+		if dryRun {
 			return nil
 		}
 		if pinned == s.Image {
 			a.progress("This digest is already installed.")
 			return nil
-		}
-		backupPath, _ := c.Flags().GetString("backup-out")
-		if backupPath == "" {
-			return errors.New("--backup-out outside the instance directory is required")
 		}
 		backupPath, err = filepath.Abs(backupPath)
 		if err != nil {
@@ -204,11 +232,10 @@ func (a *App) updateCommand() *cobra.Command {
 		}
 		return nil
 	}}
-	c.Flags().String("version", "", "Exact release version")
+	c.Flags().String("version", "", "Exact release version (default: newest signed release)")
 	c.Flags().String("repository", "", "Image repository to pull the release from (default: the installed image's repository)")
 	c.Flags().Bool("dry-run", false, "Download, verify and show the candidate without changing the installation")
 	c.Flags().String("backup-out", "", "Encrypted pre-update recovery checkpoint outside the instance")
-	_ = c.MarkFlagRequired("version")
 	return c
 }
 
