@@ -103,6 +103,9 @@ func TestUpOnRunningInstanceDoesNotMutateOrPrompt(t *testing.T) {
 		if c.args[0] == "inspect" {
 			return containerJSON(t, l, s, true), nil
 		}
+		if c.args[len(c.args)-1] == "version" {
+			return nil, nil
+		}
 		t.Fatalf("unexpected mutation: %v", c.args)
 		return nil, nil
 	}
@@ -473,4 +476,115 @@ func TestPasswordDescriptorCanBeReusedWithinOneCommand(t *testing.T) {
 	defer clear(two)
 	defer clear(a.password)
 	require.Equal(t, one, two)
+}
+
+func TestNewestReleaseIgnoresUnstableAndSignatureTags(t *testing.T) {
+	a := newTestApp(&fakeRunner{})
+	a.Tags = func(context.Context, string) ([]string, error) {
+		return []string{"0.1.9", "0.1.12", "0.2.0-rc1", "latest", "sha256-" + strings.Repeat("a", 64), "0.1.10"}, nil
+	}
+	version, err := a.newestRelease(context.Background(), defaultRepository)
+	require.NoError(t, err)
+	require.Equal(t, "0.1.12", version)
+}
+
+func TestUpdateWithoutVersionUsesNewestRelease(t *testing.T) {
+	r := &fakeRunner{}
+	a := newTestApp(r)
+	l, _ := fixture(t, a)
+	a.Tags = func(context.Context, string) ([]string, error) { return []string{"1.2.3", "1.2.4"}, nil }
+	var pulled string
+	r.run = func(c runCall) ([]byte, error) {
+		switch {
+		case c.name == "cosign":
+			return nil, nil
+		case c.args[0] == "pull":
+			pulled = c.args[1]
+		case c.args[0] == "image":
+			return json.Marshal([]string{"fystacklabs/cosigner@sha256:" + strings.Repeat("b", 64)})
+		case c.args[len(c.args)-1] == "capabilities":
+			return []byte(`{"operator_api":2,"unlock_protocol":2,"storage_schema":1,"version":"1.2.4"}`), nil
+		}
+		return nil, nil
+	}
+	cmd := a.Command()
+	cmd.SetArgs([]string{"--home", l.home, "update", "--dry-run"})
+	require.NoError(t, cmd.Execute())
+	require.Equal(t, "fystacklabs/cosigner:1.2.4", pulled)
+
+	r.calls = nil
+	a.Tags = func(context.Context, string) ([]string, error) { return []string{"1.2.2", "1.2.3"}, nil }
+	cmd = a.Command()
+	cmd.SetArgs([]string{"--home", l.home, "update"})
+	require.NoError(t, cmd.Execute())
+	require.Empty(t, r.calls)
+}
+
+func TestUpdateRequiresBackupBeforePulling(t *testing.T) {
+	r := &fakeRunner{}
+	a := newTestApp(r)
+	l, _ := fixture(t, a)
+	cmd := a.Command()
+	cmd.SetArgs([]string{"--home", l.home, "update", "--version", "1.2.4"})
+	require.ErrorContains(t, cmd.Execute(), "--backup-out")
+	require.Empty(t, r.calls)
+}
+
+func TestStartupChecksContractWithoutReverifyingSignature(t *testing.T) {
+	r := &fakeRunner{run: func(c runCall) ([]byte, error) {
+		if c.name == "cosign" {
+			t.Fatal("startup must not re-run signature verification")
+		}
+		return []byte(`{"operator_api":2,"unlock_protocol":2,"storage_schema":1,"version":"1.2.3"}`), nil
+	}}
+	a := newTestApp(r)
+	_, err := a.runtimeCapabilities(context.Background(), "docker", testImage)
+	require.NoError(t, err)
+}
+
+func TestUpStopsBeforePromptsWhenCosignMissing(t *testing.T) {
+	r := &fakeRunner{run: func(c runCall) ([]byte, error) {
+		if c.name == "cosign" {
+			return nil, errors.New(`exec: "cosign": executable file not found in $PATH`)
+		}
+		if c.args[0] == "ps" {
+			return nil, nil
+		}
+		return nil, nil
+	}}
+	a := newTestApp(r)
+	a.Tags = func(context.Context, string) ([]string, error) {
+		t.Fatal("release lookup must not run without cosign")
+		return nil, nil
+	}
+	cmd := a.Command()
+	cmd.SetArgs([]string{"--home", t.TempDir(), "up", "--apex-endpoint", DefaultApexEndpoint})
+	require.ErrorContains(t, cmd.Execute(), "cosign is required")
+	require.Nil(t, a.password)
+}
+
+func TestCosignInstallHintMatchesHost(t *testing.T) {
+	require.Contains(t, cosignInstallHint("darwin", "arm64", ""), "brew install cosign")
+	require.Contains(t, cosignInstallHint("linux", "amd64", "ID=alpine\n"), "apk add cosign")
+	require.Contains(t, cosignInstallHint("linux", "amd64", "ID=manjaro\nID_LIKE=arch\n"), "pacman -S cosign")
+	ubuntu := cosignInstallHint("linux", "arm64", "NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n")
+	require.Contains(t, ubuntu, "releases/latest/download/cosign-linux-arm64")
+	require.Contains(t, ubuntu, "/usr/local/bin/cosign")
+}
+
+func TestLogWriterRedactsTokenSplitAcrossWrites(t *testing.T) {
+	var out bytes.Buffer
+	a := newTestApp(&fakeRunner{})
+	a.Out = &out
+	w := a.logWriter([]byte("secret-token"))
+	w.Write([]byte("pairing with secr"))
+	w.Write([]byte("et-token\npartial"))
+	w.Flush()
+	require.Equal(t, "    │ pairing with [REDACTED]\n    │ partial\n", out.String())
+}
+
+func TestTaggedImageKeepsDigest(t *testing.T) {
+	s := Settings{Image: testImage, RuntimeVersion: "v0.1.12"}
+	require.Equal(t, "fystacklabs/cosigner:0.1.12@sha256:"+strings.Repeat("a", 64), taggedImage(s))
+	require.Equal(t, testImage, taggedImage(Settings{Image: testImage}))
 }

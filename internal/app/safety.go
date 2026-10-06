@@ -124,7 +124,7 @@ func (a *App) alreadyRunning(ctx context.Context, docker string, l layout, saved
 			if c.State.Status == "paused" || c.State.Status == "restarting" {
 				return false, fmt.Errorf("instance is %s; stop it explicitly before continuing", c.State.Status)
 			}
-			if c.Config.Image != saved.Image {
+			if c.Config.Image != saved.Image && c.Config.Image != taggedImage(saved) {
 				return false, errors.New("running image differs from the installed digest; stop and reconcile it explicitly")
 			}
 			return true, nil

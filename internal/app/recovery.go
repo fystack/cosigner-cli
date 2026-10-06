@@ -190,7 +190,7 @@ func (a *App) writeRecovery(l layout, s Settings, path string, password []byte) 
 	return atomicWrite(path, blob, 0600)
 }
 func (a *App) backupCommand() *cobra.Command {
-	c := &cobra.Command{Use: "backup", Short: "Create an encrypted complete installation archive (offline)", RunE: func(c *cobra.Command, _ []string) error {
+	c := &cobra.Command{Use: "backup", Short: "Create an encrypted backup (service must be stopped)", RunE: func(c *cobra.Command, _ []string) error {
 		l, s, err := a.installation(c)
 		if err != nil {
 			return err
@@ -226,7 +226,7 @@ func (a *App) backupCommand() *cobra.Command {
 	return c
 }
 func (a *App) restoreCommand() *cobra.Command {
-	c := &cobra.Command{Use: "restore", Short: "Restore an installation into an empty directory; does not start signing", RunE: func(c *cobra.Command, _ []string) error {
+	c := &cobra.Command{Use: "restore", Short: "Restore an encrypted backup into an empty directory", RunE: func(c *cobra.Command, _ []string) error {
 		home, err := a.home(c)
 		if err != nil {
 			return err
