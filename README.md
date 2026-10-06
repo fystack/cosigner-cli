@@ -14,19 +14,65 @@ transaction to your approval callback, and your own policy decides whether it go
 
 Each instance is one cosigner container with its own identity and an encrypted SQLite database.
 
-- **Platforms:** Linux (production), macOS with Docker Desktop (development). amd64 and arm64.
+- **Platforms:** Linux (production), macOS with Docker Desktop (development), Windows through WSL 2 (development). amd64 and arm64.
 - **Nitro enclave deployments** are not covered here. See the runtime repository.
 
 ## Prerequisites
 
-- Docker Engine with Compose v2
-- [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/), used to verify the CLI and every runtime image
+You need two tools on the host:
+
+- **Docker** with Compose v2, which runs the cosigner container
+- **[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/)**, which verifies the signature of the CLI and every runtime image
+
+### Linux
+
+1. Install Docker Engine and the Compose plugin by following the [official guide for your distro](https://docs.docker.com/engine/install/).
+2. Install Cosign:
+
+   ```bash
+   # Debian, Ubuntu, RHEL, Fedora and most other distros
+   ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+   curl -fsSLO "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-$ARCH"
+   sudo install -m 0755 "cosign-linux-$ARCH" /usr/local/bin/cosign && rm "cosign-linux-$ARCH"
+
+   # Alpine
+   sudo apk add cosign
+
+   # Arch
+   sudo pacman -S cosign
+   ```
+
+### macOS
+
+1. Install [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/) and start it. Compose v2 is included.
+2. Install Cosign with [Homebrew](https://brew.sh):
+
+   ```bash
+   brew install cosign
+   ```
+
+### Windows
+
+There is no native Windows build. Run everything inside WSL 2:
+
+1. In PowerShell as Administrator, install WSL with Ubuntu, then restart:
+
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+
+2. Install [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/). In **Settings → Resources → WSL integration**, turn on integration for Ubuntu.
+3. Open the Ubuntu terminal and follow the [Linux](#linux) Cosign steps. Run all `cosigner-cli` commands from that terminal.
+
+### Check your setup
 
 ```bash
-brew install cosign                                          # macOS
-go install github.com/sigstore/cosign/v3/cmd/cosign@latest   # anywhere with Go
+docker version
+docker compose version
 cosign version
 ```
+
+All three should print a version. If `docker` fails with a permission error on Linux, add yourself to the `docker` group (`sudo usermod -aG docker $USER`) and log in again.
 
 ## Install
 
