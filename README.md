@@ -83,6 +83,7 @@ off-host; container log rotation does not rotate the audit file.
 cosigner-cli --home /srv/cosigner logs --follow
 cosigner-cli --home /srv/cosigner stop
 cosigner-cli --home /srv/cosigner backup --out /secure/backups/cosigner.enc
+cosigner-cli --home /srv/cosigner export --out-dir /secure/exports   # .mshare files for Fystack Recovery
 cosigner-cli --home /srv/cosigner start
 
 cosigner-cli --home /srv/cosigner update --dry-run
@@ -101,6 +102,10 @@ local state, with authenticated encryption and file integrity checks. Treat the
 archive and password as custody secrets, store separately and test recovery.
 Limits: 128 MiB source data / 256 MiB encrypted archive. Larger deployments need a
 reviewed native backup procedure, not a partial backup.
+
+Export (manual profile, stopped instance) writes one `.mshare` file per wallet
+(`--wallet ID` to select, `--list` to see stored wallets) and prints a six-word
+passphrase once. Store the passphrase apart from the files.
 
 Restore accepts only an empty destination and never starts signing. Re-establish
 external KMS permissions and callback connectivity. Fence/revoke the old instance

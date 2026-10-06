@@ -95,7 +95,7 @@ func (a *App) Command() *cobra.Command {
 	root.SetErr(a.Err)
 	root.PersistentFlags().String("home", "", "Instance directory (default: current directory)")
 	root.PersistentFlags().String("docker", "", "Docker command")
-	root.AddCommand(a.setupCommand(), a.startCommand(), a.stopCommand(), a.restartCommand(), a.statusCommand(), a.logsCommand(), a.doctorCommand(), a.infoCommand(), a.backupCommand(), a.restoreCommand(), a.updateCommand(), a.versionCommand())
+	root.AddCommand(a.setupCommand(), a.startCommand(), a.stopCommand(), a.restartCommand(), a.statusCommand(), a.logsCommand(), a.doctorCommand(), a.infoCommand(), a.backupCommand(), a.restoreCommand(), a.exportCommand(), a.updateCommand(), a.versionCommand())
 	for _, cmd := range root.Commands() {
 		cmd.Args = cobra.NoArgs
 		switch cmd.Name() {
