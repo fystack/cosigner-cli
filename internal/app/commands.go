@@ -129,6 +129,15 @@ func (a *App) setup(cmd *cobra.Command, _ []string) error {
 		a.success("Cosigner " + caps.Version + " pinned to " + pinned)
 		saved.Image, saved.RuntimeVersion, saved.Docker = pinned, caps.Version, docker
 	}
+	if input, _ := cmd.Flags().GetString("config"); fresh && input != "" {
+		raw, err := os.ReadFile(input)
+		if err != nil {
+			return err
+		}
+		if err := validateCallbackFiles(l, raw); err != nil {
+			return err
+		}
+	}
 	if saved.Profile == "manual" {
 		a.progress("Unlocking encrypted local storage…")
 		// Cached on the App, so provisioning and startup reuse this entry.
@@ -427,6 +436,13 @@ func (a *App) startService(ctx context.Context, docker string, l layout, s Setti
 	if err := a.dockerOK(ctx, docker); err != nil {
 		return err
 	}
+	config, err := os.ReadFile(l.config)
+	if err != nil {
+		return err
+	}
+	if err := validateCallbackFiles(l, config); err != nil {
+		return err
+	}
 	if _, err := a.Runner.Run(ctx, docker, []string{"image", "inspect", s.Image}, nil, nil); err != nil {
 		a.progress("Pulling Cosigner image " + s.Image + "…")
 		if err := a.Runner.Stream(ctx, docker, []string{"pull", s.Image}, nil, nil, a.Out); err != nil {
@@ -441,20 +457,13 @@ func (a *App) startService(ctx context.Context, docker string, l layout, s Setti
 	port, token := "0", "unused"
 	var unlock *unlockServer
 	if s.Profile == "manual" {
-		password, err := a.readPassword(false)
+		envelope, err := os.ReadFile(l.encryptedKEK())
 		if err != nil {
 			return err
 		}
 		// Verify before recreating a healthy container.
-		envelope, err := os.ReadFile(l.encryptedKEK())
+		password, err := a.storagePassword(envelope)
 		if err != nil {
-			clear(password)
-			return err
-		}
-		plain, err := decryptKEK(password, envelope)
-		clear(plain)
-		if err != nil {
-			clear(password)
 			return err
 		}
 		unlock, err = newUnlockServer(password)
@@ -604,6 +613,13 @@ func (a *App) doctorCommand() *cobra.Command {
 		if err := validatePaired(l, s); err != nil {
 			return err
 		}
+		config, err := os.ReadFile(l.config)
+		if err != nil {
+			return err
+		}
+		if err := validateCallbackFiles(l, config); err != nil {
+			return err
+		}
 		if _, err := a.ownedContainers(c.Context(), docker, l, s); err != nil {
 			return err
 		}
@@ -630,7 +646,7 @@ func (a *App) infoCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Out, "public_key: %simage: %s\nruntime_version: %s\n", raw, s.Image, s.RuntimeVersion)
+		fmt.Fprintf(a.Out, "public_key: %simage: %s\nruntime_version: %s\n%s", raw, s.Image, s.RuntimeVersion, callbackInfo(l))
 		return nil
 	}}
 }

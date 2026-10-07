@@ -89,7 +89,8 @@ func (a *App) readPassword(confirm bool) (result []byte, resultErr error) {
 			return nil, fmt.Errorf("read storage encryption password: %w", err)
 		}
 		if len(password) == 0 {
-			return nil, errors.New("storage encryption password is required")
+			fmt.Fprintln(a.Out, "Password can't be empty; try again (Ctrl-C to quit).")
+			continue
 		}
 		if !confirm {
 			return password, nil
@@ -177,9 +178,43 @@ func decryptKEK(password, raw []byte) ([]byte, error) {
 	}
 	plaintext, err := aead.Open(nil, nonce, ciphertext, kekAAD(envelope.Version))
 	if err != nil {
-		return nil, errors.New("could not decrypt storage key; check the password")
+		return nil, errWrongPassword
 	}
 	return plaintext, nil
+}
+
+var errWrongPassword = errors.New("could not decrypt storage key; check the password")
+
+// storagePassword returns a password that opens the envelope. A password typed
+// at a terminal is asked for again until it is right; one supplied by
+// environment or descriptor fails at once.
+func (a *App) storagePassword(envelope []byte) ([]byte, error) {
+	for {
+		password, err := a.readPassword(false)
+		if err != nil {
+			return nil, err
+		}
+		plain, err := decryptKEK(password, envelope)
+		clear(plain)
+		if err == nil {
+			return password, nil
+		}
+		clear(password)
+		if !errors.Is(err, errWrongPassword) || !a.typedPassword() {
+			return nil, err
+		}
+		clear(a.password)
+		a.password = nil
+		fmt.Fprintln(a.Out, "Wrong password; try again (Ctrl-C to quit).")
+	}
+}
+
+func (a *App) typedPassword() bool {
+	if a.Getenv("COSIGNER_PASSWORD_FD") != "" || a.Getenv(passwordEnv) != "" {
+		return false
+	}
+	file, ok := a.In.(*os.File)
+	return ok && isTerminal(file)
 }
 
 func derivePasswordKey(password, salt []byte, time, memory uint32, threads uint8) []byte {

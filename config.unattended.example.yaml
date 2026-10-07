@@ -25,5 +25,5 @@ callback:
   private_key:
     type: file
     config:
-      path: /run/secrets/callback-private.hex
-  response_public_key_path: /run/secrets/callback-response.pub.pem
+      path: /run/secrets/cosigner-private.der.hex
+  response_public_key_path: /run/secrets/server-public.pem
