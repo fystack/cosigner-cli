@@ -138,7 +138,9 @@ cosigner-cli logs -f
 | `status`  | Show runtime status                                             |
 | `logs`    | Show logs (`-f` to follow, `--tail N`)                          |
 | `doctor`  | Check Docker, config, image signature and install state         |
-| `info`    | Print the public cosigner identity                              |
+| `info`    | Print the public cosigner identity and callback key             |
+| `callback add` | Require approval from a callback server (see below)        |
+| `callback remove` | Stop requiring callback approval                        |
 | `backup`  | Encrypted backup of the instance (must be stopped)              |
 | `restore` | Restore a backup into an empty directory                        |
 | `export`  | Write `.mshare` files for Fystack Recovery (must be stopped)    |
@@ -146,6 +148,46 @@ cosigner-cli logs -f
 | `version` | Print CLI and runtime versions                                  |
 
 Global flags: `--home DIR` (or `COSIGNER_HOME`), `--docker CMD`.
+
+## Approval callback
+
+`callback add` connects a paired cosigner to your approval callback. It generates the cosigner's
+callback key in `secrets/` (reused on later runs), pins the server's public key, writes the
+`callback` block into `config.yaml` and restarts a running cosigner. Only public keys are exchanged.
+
+Need a callback server? Start from [`examples/node-callback-server`](examples/node-callback-server):
+it generates its own keypair, and its README covers bringing your own keys with OpenSSL, a
+secret manager or AWS KMS.
+
+Callback server on the same machine (local development), pointing at its key folder:
+
+```bash
+cosigner-cli callback add ./callback-keys
+```
+
+It reads `server-public.pem` from the folder, writes the cosigner's key there as
+`cosigner-public.pem`, and uses `http://host.docker.internal:8089/cosigner/approve`
+(override with `--url`). The [Node.js example](examples/node-callback-server) picks the key up
+by itself; restart other callback servers. Folders from older callback servers
+(`response-public.pem`) still work: the cosigner's key is then written as `request-public.pem`.
+
+Callback server elsewhere:
+
+```bash
+cosigner-cli callback add https://callback.example.com --server-public-key server-public.pem
+```
+
+Without `--server-public-key` it asks for the path to the server's public key file (`-----BEGIN PUBLIC KEY-----`; never its private key). It then writes the cosigner's public key to
+`cosigner-public.pem` in the instance directory and prints its full path: copy that file to the
+callback server (the Node example reads it as `keys/cosigner-public.pem`). `/cosigner/approve` is added when the URL has no path. Use
+`--ca ca.pem` if the callback uses a private or self-signed TLS certificate.
+
+Signing requests are rejected until the callback server is reachable and trusts the cosigner's key.
+`cosigner-cli info` prints the key again. `callback remove` turns approval off after confirmation.
+
+`start`, `restart`, `up` and `doctor` check the callback files before asking for the password:
+keys must exist, be RSA-4096 and live in `secrets/` or `state/`, and the URL must not be
+`localhost` (inside the container that is the cosigner itself).
 
 ## Profiles
 
