@@ -276,7 +276,7 @@ func TestStartRejectsBrokenCallbackBeforePassword(t *testing.T) {
 	a := newTestApp(r)
 	l, _ := fixture(t, a)
 	broken := strings.Replace(testConfig, "approval:\n  require_callback: false\n",
-		"approval:\n  require_callback: true\ncallback:\n  url: https://cb.example.com/cosigner/approve\n  private_key:\n    type: file\n    config:\n      path: /run/secrets/callback-private.hex\n  response_public_key_path: /run/secrets/callback-response.pub.pem\n", 1)
+		"approval:\n  require_callback: true\ncallback:\n  url: https://cb.example.com/cosigner/approve\n  private_key:\n    type: file\n    config:\n      path: /run/secrets/cosigner-private.der.hex\n  response_public_key_path: /run/secrets/server-public.pem\n", 1)
 	require.NoError(t, os.WriteFile(l.config, []byte(broken), 0600))
 
 	err := runCLI(t, a, "--home", l.home, "start")

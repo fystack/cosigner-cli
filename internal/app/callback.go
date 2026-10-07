@@ -27,8 +27,8 @@ const (
 	callbackKeyBits     = 4096
 	callbackApprovePath = "/cosigner/approve"
 	callbackDevURL      = "http://host.docker.internal:8089" + callbackApprovePath
-	callbackPrivateKey  = "callback-private.hex"
-	callbackServerKey   = "callback-response.pub.pem"
+	callbackPrivateKey  = "cosigner-private.der.hex"
+	callbackServerKey   = "server-public.pem"
 	callbackCA          = "callback-ca.pem"
 	// Public half exported for the callback server; not secret, so it lives outside secrets/.
 	callbackPublicKey       = "cosigner-public.pem"

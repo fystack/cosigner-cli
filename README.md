@@ -103,8 +103,8 @@ Edit `/secure/config.yaml`:
 
 - set `callback.url` to your approval callback endpoint
 - put the callback credentials in `/srv/cosigner/secrets/` (mode `600`):
-  - `callback-private.hex`
-  - `callback-response.pub.pem`
+  - `cosigner-private.der.hex`
+  - `server-public.pem`
 
 **2. Pair and start**
 

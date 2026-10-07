@@ -169,8 +169,8 @@ the hex-encoded PKCS#8 DER format the cosigner runtime reads:
 ```bash
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out cosigner.pem
 openssl pkcs8 -topk8 -nocrypt -in cosigner.pem -outform DER | xxd -p | tr -d '\n' \
-  > <instance>/secrets/callback-private.hex
-chmod 600 <instance>/secrets/callback-private.hex
+  > <instance>/secrets/cosigner-private.der.hex
+chmod 600 <instance>/secrets/cosigner-private.der.hex
 shred -u cosigner.pem
 cosigner-cli callback add https://callback.example.com --server-public-key server-public.pem
 ```
