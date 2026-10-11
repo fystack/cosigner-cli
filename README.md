@@ -22,7 +22,7 @@ Each instance is one cosigner container with its own identity and an encrypted S
 You need two tools on the host:
 
 - **Docker** with Compose v2, which runs the cosigner container
-- **[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/)**, which verifies the signature of the CLI and every runtime image
+- **[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/)**, which verifies the signature of the CLI and every runtime image. The [installer](#install) adds it for you if it's missing.
 
 ### Linux
 
@@ -76,13 +76,20 @@ All three should print a version. If `docker` fails with a permission error on L
 
 ## Install
 
-From a signed release:
+```bash
+curl -sSL https://cosigner.fystack.io/install.sh | sh
+```
+
+The installer installs cosign if it's missing, then checks `cosigner-cli` against the signed release
+checksums and its Sigstore signature before installing it to `/usr/local/bin`. It also checks Docker and
+tells you what to fix. To pin a version or install directory:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/fystack/cosigner-cli/main/scripts/install.sh
-bash install.sh v1.2.3 /opt/cosigner-cli/bin    # target dir must not exist yet
-export PATH="/opt/cosigner-cli/bin:$PATH"
+curl -sSL https://cosigner.fystack.io/install.sh | sh -s -- --version v1.2.3 --dir /opt/cosigner-cli/bin
 ```
+
+[cosigner.fystack.io](https://cosigner.fystack.io) lists every release with its checksums and shows how
+to verify the installer by hand before running it.
 
 Or build from source (Go 1.26+):
 
