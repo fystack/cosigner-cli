@@ -23,17 +23,35 @@ jobs:
           [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           go mod verify
           make test
+          sudo apt-get install -y dash shellcheck >/dev/null
+          scripts/test-installer.sh
           make dist VERSION="$VERSION" COMMIT="$GITHUB_SHA"
-          (cd dist && sha256sum cosigner-cli-* > SHA256SUMS)
       # v4+ is required for cosign v3, which no longer publishes detached .sig files.
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.1.3
-      - name: Sign release artifacts
+      - name: Sign binaries
         run: |
-          for artifact in dist/cosigner-cli-* dist/SHA256SUMS; do
+          for artifact in dist/cosigner-cli-*; do
             cosign sign-blob --yes --bundle "$artifact.sigstore.json" "$artifact"
           done
+      # install.sh pins the SHA-256 of each binary and bundle, so it is rendered
+      # after signing. cosigner-site mirrors it after verifying its signature.
+      - name: Render installer
+        run: |
+          scripts/render-installer.sh "$VERSION" "$GITHUB_SHA" dist
+          shellcheck -s sh dist/install.sh
+          dash -n dist/install.sh
+          dash dist/install.sh --help >/dev/null
+      - name: Checksum and sign installer
+        run: |
+          (cd dist && sha256sum cosigner-cli-{linux,darwin}-{amd64,arm64} install.sh > SHA256SUMS)
+          for artifact in dist/install.sh dist/SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$artifact.sigstore.json" "$artifact"
+          done
+          cosign verify-blob dist/install.sh --bundle dist/install.sh.sigstore.json \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

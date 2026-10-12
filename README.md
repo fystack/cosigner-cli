@@ -89,7 +89,18 @@ curl -sSL https://cosigner.fystack.io/install.sh | sh -s -- --version v1.2.3 --d
 ```
 
 [cosigner.fystack.io](https://cosigner.fystack.io) lists every release with its checksums and shows how
-to verify the installer by hand before running it.
+to verify the installer by hand before running it. Each release's `install.sh` is built and signed by
+this repository's release workflow, so you can also check it with cosign before running it:
+
+```bash
+V=v1.2.3
+curl -fsSLO "https://github.com/fystack/cosigner-cli/releases/download/$V/install.sh"
+curl -fsSLO "https://github.com/fystack/cosigner-cli/releases/download/$V/install.sh.sigstore.json"
+cosign verify-blob install.sh --bundle install.sh.sigstore.json \
+  --certificate-identity "https://github.com/fystack/cosigner-cli/.github/workflows/release.yml@refs/tags/$V" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sh install.sh
+```
 
 Or build from source (Go 1.26+):
 
@@ -275,6 +286,14 @@ cosigner-cli update --version v1.2.3 --backup-out ...            # pin a version
 make build   # local binary
 make test    # go vet + race tests
 make dist    # linux/darwin × amd64/arm64 binaries
+scripts/test-installer.sh   # render, shellcheck and test install.sh under dash
 ```
 
-Releases: pushing a `vX.Y.Z` tag runs the release workflow, which publishes signed binaries.
+Releases: pushing a `vX.Y.Z` tag runs the release workflow. It builds and signs the binaries, renders
+`install.sh` from [`scripts/install.sh.tmpl`](scripts/install.sh.tmpl) with their SHA-256s pinned, then
+signs `install.sh` and `SHA256SUMS`. [cosigner.fystack.io](https://cosigner.fystack.io) verifies the
+signed `install.sh` and serves it unchanged, so installer changes ship with the next CLI release.
+
+The installer must stay POSIX `sh`: `curl | sh` runs it under `dash` on Debian and Ubuntu. To bump the
+cosign it installs when a host has none, update [`scripts/cosign.env`](scripts/cosign.env) from that
+cosign release's `cosign_checksums.txt` and run `scripts/check-cosign-pin.sh`.

@@ -1,0 +1,381 @@
+#!/bin/sh
+# Fystack cosigner-cli installer
+#
+#   curl -sSL @@BASE_URL@@/install.sh | sh
+#   curl -sSL @@BASE_URL@@/install.sh | sh -s -- --version v1.2.3 --dir /opt/cosigner-cli/bin
+#
+# Generated for cosigner-cli @@VERSION@@ (commit @@COMMIT@@) by its release workflow,
+# which signs this file too (install.sh.sigstore.json on the GitHub release).
+# Binaries are downloaded from the @@REPOSITORY@@ GitHub release, checked against
+# the SHA-256s pinned below, then verified with cosign against the release
+# workflow identity of @@REPOSITORY@@ for this tag.
+#
+# Source: scripts/install.sh.tmpl in @@REPOSITORY@@, rendered by
+# scripts/render-installer.sh. Edit the template, not this file.
+#
+# Everything runs inside main(), so a partially downloaded script does nothing.
+
+set -eu
+
+VERSION="@@VERSION@@"
+COMMIT="@@COMMIT@@"
+BASE_URL="@@BASE_URL@@"
+REPOSITORY="@@REPOSITORY@@"
+
+SHA256_LINUX_AMD64="@@SHA256_LINUX_AMD64@@"
+SHA256_LINUX_ARM64="@@SHA256_LINUX_ARM64@@"
+SHA256_DARWIN_AMD64="@@SHA256_DARWIN_AMD64@@"
+SHA256_DARWIN_ARM64="@@SHA256_DARWIN_ARM64@@"
+
+# Signature bundles (Sigstore) for each binary.
+BUNDLE_SHA256_LINUX_AMD64="@@BUNDLE_SHA256_LINUX_AMD64@@"
+BUNDLE_SHA256_LINUX_ARM64="@@BUNDLE_SHA256_LINUX_ARM64@@"
+BUNDLE_SHA256_DARWIN_AMD64="@@BUNDLE_SHA256_DARWIN_AMD64@@"
+BUNDLE_SHA256_DARWIN_ARM64="@@BUNDLE_SHA256_DARWIN_ARM64@@"
+
+COSIGN_VERSION="@@COSIGN_VERSION@@"
+COSIGN_SHA256_LINUX_AMD64="@@COSIGN_SHA256_LINUX_AMD64@@"
+COSIGN_SHA256_LINUX_ARM64="@@COSIGN_SHA256_LINUX_ARM64@@"
+COSIGN_SHA256_DARWIN_AMD64="@@COSIGN_SHA256_DARWIN_AMD64@@"
+COSIGN_SHA256_DARWIN_ARM64="@@COSIGN_SHA256_DARWIN_ARM64@@"
+
+OIDC_ISSUER="https://token.actions.githubusercontent.com"
+
+# ---------------------------------------------------------------- output ----
+
+if [ -t 2 ]; then
+  BOLD="$(printf '\033[1m')"; DIM="$(printf '\033[2m')"; RED="$(printf '\033[31m')"
+  GREEN="$(printf '\033[32m')"; YELLOW="$(printf '\033[33m')"; BLUE="$(printf '\033[34m')"
+  RESET="$(printf '\033[0m')"
+else
+  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
+fi
+
+say()  { printf '%s\n' "$*" >&2; }
+step() { printf '%s==>%s %s%s%s\n' "$BLUE" "$RESET" "$BOLD" "$*" "$RESET" >&2; }
+ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*" >&2; }
+warn() { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$*" >&2; WARNINGS=$((WARNINGS + 1)); }
+die()  { printf '%serror:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<EOF
+Install the Fystack cosigner-cli (default: $VERSION) and cosign.
+
+Usage: curl -sSL $BASE_URL/install.sh | sh -s -- [options]
+
+Options:
+  --version vX.Y.Z      Install a specific release instead of $VERSION
+  --dir DIR             Install directory (default: /usr/local/bin, or
+                        ~/.local/bin when /usr/local/bin is not writable and
+                        sudo is unavailable)
+  --skip-docker-check   Do not check for Docker and Compose
+  -h, --help            Show this help
+
+Environment variables COSIGNER_VERSION and COSIGNER_INSTALL_DIR work as
+alternatives to --version and --dir.
+EOF
+}
+
+# --------------------------------------------------------------- helpers ----
+
+has() { command -v "$1" >/dev/null 2>&1; }
+
+download() { # url dest
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+    --output "$2" "$1" || die "download failed: $1"
+}
+
+sha256_of() {
+  if has sha256sum; then sha256sum "$1" | cut -d ' ' -f 1
+  elif has shasum; then shasum -a 256 "$1" | cut -d ' ' -f 1
+  elif has openssl; then openssl dgst -sha256 -r "$1" | cut -d ' ' -f 1
+  else die "need sha256sum, shasum or openssl to verify downloads"
+  fi
+}
+
+check_sha256() { # file expected label
+  actual="$(sha256_of "$1")"
+  [ "$actual" = "$2" ] || die "checksum mismatch for $3
+  expected $2
+  got      $actual
+Refusing to install. Report this to security@fystack.io."
+}
+
+# Runs a command as root when the target directory is not writable by us.
+as_owner() { # dir cmd...
+  dir="$1"; shift
+  if [ -w "$dir" ]; then "$@"; else $SUDO "$@"; fi
+}
+
+# Under `sudo sh`, run Docker as the person who will use cosigner-cli: root
+# always reaches the daemon, and Compose plugins in ~/.docker are per user.
+docker_as_user() {
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    sudo -u "$SUDO_USER" docker "$@"
+  else
+    docker "$@"
+  fi
+}
+
+# Succeeds when version $1 is at least $2 (X.Y[.Z]; a leading v and any
+# -suffix or +suffix such as 2.40.3+ds1-0ubuntu1 are ignored).
+version_ge() {
+  have="${1#v}"; have="${have%%[-+]*}"
+  case "$have" in [0-9]*.[0-9]*) ;; *) return 0 ;; esac # unparseable: don't block
+  printf '%s\n%s\n' "$2" "$have" | sort -t . -k1,1n -k2,2n -k3,3n -C
+}
+
+# ----------------------------------------------------------------- steps ----
+
+detect_platform() {
+  case "$(uname -s)" in
+    Linux) OS=linux ;;
+    Darwin) OS=darwin ;;
+    MINGW* | MSYS* | CYGWIN*) die "native Windows is not supported. Run this inside WSL 2 (Ubuntu)." ;;
+    *) die "unsupported OS $(uname -s). Linux or macOS required." ;;
+  esac
+  case "$(uname -m)" in
+    x86_64 | amd64) ARCH=amd64 ;;
+    arm64 | aarch64) ARCH=arm64 ;;
+    *) die "unsupported CPU $(uname -m). amd64 or arm64 required." ;;
+  esac
+  # An x86_64 shell under Rosetta on Apple Silicon: install the native build.
+  if [ "$OS" = darwin ] && [ "$ARCH" = amd64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
+    ARCH=arm64
+  fi
+  case "$OS-$ARCH" in
+    linux-amd64) CLI_SHA256="$SHA256_LINUX_AMD64"; BUNDLE_SHA256="$BUNDLE_SHA256_LINUX_AMD64"; COSIGN_SHA256="$COSIGN_SHA256_LINUX_AMD64" ;;
+    linux-arm64) CLI_SHA256="$SHA256_LINUX_ARM64"; BUNDLE_SHA256="$BUNDLE_SHA256_LINUX_ARM64"; COSIGN_SHA256="$COSIGN_SHA256_LINUX_ARM64" ;;
+    darwin-amd64) CLI_SHA256="$SHA256_DARWIN_AMD64"; BUNDLE_SHA256="$BUNDLE_SHA256_DARWIN_AMD64"; COSIGN_SHA256="$COSIGN_SHA256_DARWIN_AMD64" ;;
+    darwin-arm64) CLI_SHA256="$SHA256_DARWIN_ARM64"; BUNDLE_SHA256="$BUNDLE_SHA256_DARWIN_ARM64"; COSIGN_SHA256="$COSIGN_SHA256_DARWIN_ARM64" ;;
+  esac
+  [ -n "$CLI_SHA256" ] || die "release $VERSION has no build for $OS/$ARCH"
+}
+
+choose_install_dir() {
+  SUDO=""
+  if [ "$(id -u)" -ne 0 ] && has sudo; then SUDO="sudo"; fi
+
+  if [ -n "$INSTALL_DIR" ]; then
+    case "$INSTALL_DIR" in /*) ;; *) die "--dir must be an absolute path" ;; esac
+  elif [ -w /usr/local/bin ] || [ -n "$SUDO" ] || [ "$(id -u)" -eq 0 ]; then
+    INSTALL_DIR=/usr/local/bin
+  else
+    INSTALL_DIR="$HOME/.local/bin"
+  fi
+
+  if [ ! -d "$INSTALL_DIR" ]; then
+    parent="$(dirname "$INSTALL_DIR")"
+    while [ ! -d "$parent" ]; do parent="$(dirname "$parent")"; done
+    as_owner "$parent" mkdir -p "$INSTALL_DIR"
+  fi
+  if [ ! -w "$INSTALL_DIR" ] && [ -z "$SUDO" ]; then
+    die "$INSTALL_DIR is not writable and sudo is not available. Re-run with --dir \$HOME/.local/bin"
+  fi
+  if [ ! -w "$INSTALL_DIR" ]; then
+    say "  ${DIM}$INSTALL_DIR needs root, you may be asked for your sudo password${RESET}"
+  fi
+}
+
+# Prints the cosign major version, or nothing when it cannot be parsed.
+cosign_major() {
+  "$1" version 2>/dev/null | sed -n 's/^GitVersion:[[:space:]]*v\{0,1\}\([0-9][0-9]*\)\..*/\1/p' | head -n 1
+}
+
+ensure_cosign() {
+  step "Checking cosign"
+  COSIGN=""
+  if has cosign; then
+    major="$(cosign_major cosign)"
+    if [ -n "$major" ] && [ "$major" -ge 3 ]; then
+      COSIGN="$(command -v cosign)"
+      ok "cosign v$major found at $COSIGN"
+      return
+    fi
+  fi
+
+  asset="cosign-$OS-$ARCH"
+  download "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/$asset" "$TMP/cosign"
+  check_sha256 "$TMP/cosign" "$COSIGN_SHA256" "cosign $COSIGN_VERSION"
+  chmod 0755 "$TMP/cosign"
+
+  if has cosign; then
+    # An older cosign is on PATH. Use the verified copy for this install
+    # only, and leave the user's own installation alone.
+    COSIGN="$TMP/cosign"
+    warn "cosign at $(command -v cosign) is older than v3. Using a verified $COSIGN_VERSION for this install. Upgrade it so cosigner-cli can verify runtime images reliably."
+  else
+    as_owner "$INSTALL_DIR" install -m 0755 "$TMP/cosign" "$INSTALL_DIR/cosign"
+    COSIGN="$INSTALL_DIR/cosign"
+    ok "installed cosign $COSIGN_VERSION to $COSIGN (sha256 verified)"
+  fi
+}
+
+install_cli() {
+  step "Installing cosigner-cli $VERSION"
+  asset="cosigner-cli-$OS-$ARCH"
+  base="https://github.com/$REPOSITORY/releases/download/$VERSION"
+  download "$base/$asset" "$TMP/$asset"
+  download "$base/$asset.sigstore.json" "$TMP/$asset.sigstore.json"
+
+  check_sha256 "$TMP/$asset" "$CLI_SHA256" "$asset"
+  check_sha256 "$TMP/$asset.sigstore.json" "$BUNDLE_SHA256" "$asset.sigstore.json"
+  ok "sha256 matches the pinned release checksums"
+
+  "$COSIGN" verify-blob "$TMP/$asset" \
+    --bundle "$TMP/$asset.sigstore.json" \
+    --certificate-identity "https://github.com/$REPOSITORY/.github/workflows/release.yml@refs/tags/$VERSION" \
+    --certificate-oidc-issuer "$OIDC_ISSUER" >/dev/null 2>"$TMP/cosign.log" \
+    || { cat "$TMP/cosign.log" >&2; die "signature verification failed for $asset. Refusing to install."; }
+  ok "signature verified (built by $REPOSITORY release workflow for $VERSION)"
+
+  previous=""
+  if [ -x "$INSTALL_DIR/cosigner-cli" ]; then
+    previous="$("$INSTALL_DIR/cosigner-cli" version 2>/dev/null | sed -n 's/^cosigner-cli \([^ ]*\).*/\1/p' | head -n 1 || true)"
+  fi
+  as_owner "$INSTALL_DIR" install -m 0755 "$TMP/$asset" "$INSTALL_DIR/cosigner-cli"
+  if [ -n "$previous" ] && [ "$previous" != "$VERSION" ]; then
+    ok "upgraded $previous → $VERSION at $INSTALL_DIR/cosigner-cli"
+  else
+    ok "installed to $INSTALL_DIR/cosigner-cli"
+  fi
+}
+
+check_docker() {
+  step "Checking Docker"
+  if ! has docker; then
+    if [ "$OS" = darwin ]; then
+      warn "Docker is not installed. Install Docker Desktop: https://docs.docker.com/desktop/setup/install/mac-install/"
+    elif grep -qi microsoft /proc/version 2>/dev/null; then
+      warn "Docker is not installed. Install Docker Desktop for Windows and turn on WSL integration for this distro."
+    else
+      warn "Docker is not installed. Install Docker Engine: https://docs.docker.com/engine/install/"
+    fi
+    return
+  fi
+  ok "docker $(docker version --format '{{.Client.Version}}' 2>/dev/null || echo found)"
+
+  # cosigner-cli calls `docker compose` (the v2+ plugin; it is already v5 on
+  # some hosts). The standalone v1 docker-compose binary is not used.
+  compose="$(docker_as_user compose version --short 2>/dev/null || true)"
+  if [ -z "$compose" ]; then
+    if has docker-compose; then
+      warn "Found the standalone docker-compose, but cosigner-cli needs the 'docker compose' plugin. Install the docker-compose-plugin package (or update Docker Desktop)."
+    else
+      warn "Docker Compose v2 is missing. Install the docker-compose-plugin package (or update Docker Desktop)."
+    fi
+  elif version_ge "$compose" 2.0; then
+    ok "docker compose $compose"
+  else
+    warn "Docker Compose $compose is too old; v2 or newer is required."
+  fi
+
+  user="${SUDO_USER:-$(id -un)}"
+  if [ "$(id -u)" -eq 0 ] && [ "$user" = root ]; then
+    warn "Running as root, so Docker access for a non-root user was not checked. Run cosigner-cli as a non-root user in the docker group."
+  fi
+  if info="$(docker_as_user info 2>&1)"; then
+    ok "Docker daemon is reachable as $user"
+    # host-gateway and `docker run --pull never` need Engine 20.10+.
+    engine="$(docker_as_user version --format '{{.Server.Version}}' 2>/dev/null || true)"
+    if [ -n "$engine" ] && ! version_ge "$engine" 20.10; then
+      warn "Docker Engine $engine is too old; 20.10 or newer is required."
+    fi
+  elif printf '%s' "$info" | grep -qi 'permission denied'; then
+    if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      warn "$user is in the docker group, but this login session started before that. Log out and back in (or run: newgrp docker)."
+    else
+      warn "$user has no permission to use Docker. Run: sudo usermod -aG docker $user, then log out and back in."
+    fi
+  elif [ "$OS" = darwin ] || grep -qi microsoft /proc/version 2>/dev/null; then
+    warn "Docker daemon is not running. Start Docker Desktop."
+  else
+    warn "Docker daemon is not running. Run: sudo systemctl enable --now docker"
+  fi
+}
+
+# ------------------------------------------------------------------ main ----
+
+main() {
+  WARNINGS=0
+  REQUESTED_VERSION="${COSIGNER_VERSION:-}"
+  INSTALL_DIR="${COSIGNER_INSTALL_DIR:-}"
+  CHECK_DOCKER=1
+  FORWARD=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --version) [ $# -ge 2 ] || die "--version needs a value"; REQUESTED_VERSION="$2"; shift 2 ;;
+      --version=*) REQUESTED_VERSION="${1#*=}"; shift ;;
+      --dir) [ $# -ge 2 ] || die "--dir needs a value"; INSTALL_DIR="$2"; shift 2 ;;
+      --dir=*) INSTALL_DIR="${1#*=}"; shift ;;
+      --skip-docker-check) CHECK_DOCKER=0; FORWARD="--skip-docker-check"; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage; die "unknown option: $1" ;;
+    esac
+  done
+
+  has curl || die "curl is required"
+  has uname || die "uname is required"
+
+  TMP="$(mktemp -d 2>/dev/null || mktemp -d -t cosigner-cli)"
+  trap 'rm -rf -- "$TMP"' EXIT INT TERM
+
+  # Another release: hand over to that release's own installer, which carries
+  # that release's checksums.
+  if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "$VERSION" ]; then
+    case "$REQUESTED_VERSION" in v*) ;; *) REQUESTED_VERSION="v$REQUESTED_VERSION" ;; esac
+    printf '%s' "$REQUESTED_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+      || die "invalid version $REQUESTED_VERSION (expected vX.Y.Z)"
+    step "Fetching the installer for $REQUESTED_VERSION"
+    curl --proto '=https' --tlsv1.2 --fail --silent --location \
+      --output "$TMP/install.sh" "$BASE_URL/$REQUESTED_VERSION/install.sh" \
+      || die "release $REQUESTED_VERSION not found. See $BASE_URL for available versions."
+    # Hosts can answer unknown paths with an HTML page. Only run the file if
+    # it is the installer for exactly that release.
+    grep -qx "VERSION=\"$REQUESTED_VERSION\"" "$TMP/install.sh" \
+      || die "release $REQUESTED_VERSION not found. See $BASE_URL for available versions."
+    # shellcheck disable=SC2086 # FORWARD is empty or a single flag
+    if [ -n "$INSTALL_DIR" ]; then
+      sh "$TMP/install.sh" --dir "$INSTALL_DIR" $FORWARD
+    else
+      sh "$TMP/install.sh" $FORWARD
+    fi
+    exit $?
+  fi
+
+  say ""
+  say "  ${BOLD}Fystack cosigner-cli${RESET} ${DIM}$VERSION · $(printf '%.12s' "$COMMIT")${RESET}"
+  say ""
+
+  detect_platform
+  choose_install_dir
+  ensure_cosign
+  install_cli
+  if [ "$CHECK_DOCKER" -eq 1 ]; then check_docker; fi
+
+  say ""
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *)
+      say "  ${YELLOW}$INSTALL_DIR is not on your PATH.${RESET} Add it with:"
+      say ""
+      say "    export PATH=\"$INSTALL_DIR:\$PATH\""
+      say ""
+      ;;
+  esac
+  if [ "$WARNINGS" -gt 0 ]; then
+    say "  ${BOLD}cosigner-cli is installed.${RESET} Fix the warnings above before running it."
+  else
+    say "  ${GREEN}${BOLD}cosigner-cli $VERSION is ready.${RESET}"
+  fi
+  say ""
+  say "  Next steps:"
+  say "    cosigner-cli doctor"
+  say "    cosigner-cli up --apex-endpoint https://YOUR-APEX-HOST --config /secure/config.yaml"
+  say ""
+  say "  ${DIM}Guide: $BASE_URL/#get-started${RESET}"
+  say ""
+}
+
+main "$@"
