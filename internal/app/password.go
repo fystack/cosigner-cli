@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
+	"unicode"
 
 	"golang.org/x/crypto/argon2"
 	"gopkg.in/yaml.v3"
@@ -112,6 +115,47 @@ func (a *App) readPassword(confirm bool) (result []byte, resultErr error) {
 	}
 }
 
+// newStoragePassword generates a six-word passphrase for a fresh install typed at
+// a terminal; passwords supplied by environment or descriptor are used as given.
+func (a *App) newStoragePassword() ([]byte, error) {
+	if a.password != nil || !a.typedPassword() {
+		return a.readPassword(true)
+	}
+	passphrase, err := generatePassphrase(a.Random)
+	if err != nil {
+		return nil, err
+	}
+	a.showStoragePassphrase(passphrase)
+	file := a.In.(*os.File)
+	for {
+		fmt.Fprint(a.Out, "Type the passphrase to confirm you saved it: ")
+		typed, err := readHidden(file)
+		fmt.Fprintln(a.Out)
+		if err != nil {
+			return nil, fmt.Errorf("confirm storage encryption passphrase: %w", err)
+		}
+		normalized := normalizePassphrase(typed)
+		match := bytes.Equal(normalized, []byte(passphrase))
+		clear(typed)
+		clear(normalized)
+		if match {
+			a.password = []byte(passphrase)
+			return []byte(passphrase), nil
+		}
+		fmt.Fprintln(a.Out, "That doesn't match; check your backup and try again (Ctrl-C to quit).")
+	}
+}
+
+func (a *App) showStoragePassphrase(passphrase string) {
+	warn, bold, reset := "", "", ""
+	if a.interactive() {
+		warn, bold, reset = ansiOrange+ansiBold, ansiBold, ansiReset
+	}
+	fmt.Fprintf(a.Out, "\n%s⚠  BACK UP YOUR STORAGE PASSPHRASE NOW%s\n\n    %s%s%s\n\n", warn, reset, bold, passphrase, reset)
+	fmt.Fprintf(a.Out, "%sWrite it on paper or save it in a secure password manager. It is shown only once and never stored.\n"+
+		"Without it the encrypted MPC key shares on this host can't be decrypted, and the Cosigner can't start or export them.%s\n\n", warn, reset)
+}
+
 func encryptKEK(password, plaintext []byte) ([]byte, error) {
 	if len(password) == 0 {
 		return nil, errors.New("storage encryption password is required")
@@ -194,12 +238,11 @@ func (a *App) storagePassword(envelope []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		plain, err := decryptKEK(password, envelope)
+		plain, used, err := openKEK(password, envelope)
 		clear(plain)
 		if err == nil {
-			return password, nil
+			return used, nil
 		}
-		clear(password)
 		if !errors.Is(err, errWrongPassword) || !a.typedPassword() {
 			return nil, err
 		}
@@ -207,6 +250,43 @@ func (a *App) storagePassword(envelope []byte) ([]byte, error) {
 		a.password = nil
 		fmt.Fprintln(a.Out, "Wrong password; try again (Ctrl-C to quit).")
 	}
+}
+
+// openKEK tries the password exactly as given first, so chosen passwords keep
+// working, then as a generated passphrase typed with spaces or capitals.
+func openKEK(password, envelope []byte) (plain, used []byte, err error) {
+	plain, err = decryptKEK(password, envelope)
+	if err == nil {
+		return plain, password, nil
+	}
+	normalized := normalizePassphrase(password)
+	if !errors.Is(err, errWrongPassword) || normalized == nil || bytes.Equal(normalized, password) {
+		clear(password)
+		clear(normalized)
+		return nil, nil, err
+	}
+	clear(password)
+	plain, err = decryptKEK(normalized, envelope)
+	if err != nil {
+		clear(normalized)
+		return nil, nil, err
+	}
+	return plain, normalized, nil
+}
+
+// normalizePassphrase returns the canonical hyphenated form of a generated
+// passphrase, or nil if the input isn't six wordlist words.
+func normalizePassphrase(input []byte) []byte {
+	words := strings.FieldsFunc(strings.ToLower(string(input)), func(r rune) bool { return r == '-' || unicode.IsSpace(r) })
+	if len(words) != msharePassphraseLen {
+		return nil
+	}
+	for _, w := range words {
+		if i := sort.SearchStrings(wordlist, w); i == len(wordlist) || wordlist[i] != w {
+			return nil
+		}
+	}
+	return []byte(strings.Join(words, "-"))
 }
 
 func (a *App) typedPassword() bool {

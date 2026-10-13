@@ -116,7 +116,7 @@ cosigner-cli up \
   --config /secure/config.yaml
 ```
 
-`up` prompts for the pairing token and a storage password (min 12 chars, with upper, lower, digit and symbol).
+`up` prompts for the pairing token, then generates a six-word storage passphrase and shows it once. Write it on paper or save it in a password manager: without it the encrypted MPC key shares can't be decrypted. On `start`/`restart`, paste it or type the six words; spaces or hyphens and any capitalisation work. Scripted installs can still supply their own password via `COSIGNER_PASSWORD_FD`.
 It pulls the newest signed release, verifies it and pins its digest.
 
 **3. Check it**

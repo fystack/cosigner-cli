@@ -141,7 +141,11 @@ func (a *App) setup(cmd *cobra.Command, _ []string) error {
 	if saved.Profile == "manual" {
 		a.progress("Unlocking encrypted local storage…")
 		// Cached on the App, so provisioning and startup reuse this entry.
-		password, err := a.readPassword(fresh)
+		readPassword := func() ([]byte, error) { return a.readPassword(false) }
+		if fresh {
+			readPassword = a.newStoragePassword
+		}
+		password, err := readPassword()
 		if err != nil {
 			return err
 		}
@@ -237,7 +241,7 @@ func (a *App) provision(l layout, s Settings, configPath string) error {
 		return err
 	}
 	if s.Profile == "manual" {
-		password, err := a.readPassword(true)
+		password, err := a.newStoragePassword()
 		if err != nil {
 			return err
 		}

@@ -351,11 +351,11 @@ func (a *App) storageKEK(l layout) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer clear(password)
-	plaintext, err := decryptKEK(password, raw)
+	plaintext, used, err := openKEK(password, raw)
 	if err != nil {
 		return nil, err
 	}
+	clear(used)
 	defer clear(plaintext)
 	trimmed := bytes.TrimSpace(plaintext)
 	kek := make([]byte, hex.DecodedLen(len(trimmed)))
