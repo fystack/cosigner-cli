@@ -351,11 +351,11 @@ func (a *App) storageKEK(l layout) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer clear(password)
-	plaintext, err := decryptKEK(password, raw)
+	plaintext, used, err := openKEK(password, raw)
 	if err != nil {
 		return nil, err
 	}
+	clear(used)
 	defer clear(plaintext)
 	trimmed := bytes.TrimSpace(plaintext)
 	kek := make([]byte, hex.DecodedLen(len(trimmed)))
@@ -463,20 +463,29 @@ func jointPublicKey(protocol string, blob []byte) ([]byte, error) {
 
 func generatePassphrase(random io.Reader) (string, error) {
 	words := make([]string, msharePassphraseLen)
-	limit := (uint64(1) << 32) - ((uint64(1) << 32) % uint64(len(wordlist)))
-	var buf [4]byte
 	for i := range words {
-		for {
-			if _, err := io.ReadFull(random, buf[:]); err != nil {
-				return "", fmt.Errorf("generate passphrase: %w", err)
-			}
-			if v := uint64(binary.BigEndian.Uint32(buf[:])); v < limit {
-				words[i] = wordlist[v%uint64(len(wordlist))]
-				break
-			}
+		j, err := randomIndex(random, len(wordlist))
+		if err != nil {
+			return "", fmt.Errorf("generate passphrase: %w", err)
 		}
+		words[i] = wordlist[j]
 	}
 	return strings.Join(words, "-"), nil
+}
+
+// randomIndex returns a uniform index below n, rejecting values that would bias
+// the modulo.
+func randomIndex(random io.Reader, n int) (int, error) {
+	limit := (uint64(1) << 32) - ((uint64(1) << 32) % uint64(n))
+	var buf [4]byte
+	for {
+		if _, err := io.ReadFull(random, buf[:]); err != nil {
+			return 0, err
+		}
+		if v := uint64(binary.BigEndian.Uint32(buf[:])); v < limit {
+			return int(v % uint64(n)), nil
+		}
+	}
 }
 
 var unsafeSlugChars = regexp.MustCompile(`[^a-z0-9]+`)

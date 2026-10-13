@@ -216,3 +216,38 @@ func TestGeneratePassphraseUsesBIP39Words(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, strings.Split(p, "-"), msharePassphraseLen)
 }
+
+func TestNormalizePassphrase(t *testing.T) {
+	require.Equal(t, "abandon-ability-able-about-above-absent", string(normalizePassphrase([]byte("  Abandon ability-ABLE  about\tabove absent "))))
+	require.Nil(t, normalizePassphrase([]byte("abandon ability able about above")))
+	require.Nil(t, normalizePassphrase([]byte("abandon ability able about above notaword")))
+}
+
+func TestOpenKEKAcceptsSpacedPassphraseAndExactPasswords(t *testing.T) {
+	passphrase := "abandon-ability-able-about-above-absent"
+	envelope, err := encryptKEK([]byte(passphrase), []byte("kek"))
+	require.NoError(t, err)
+	plain, used, err := openKEK([]byte("Abandon Ability Able About Above Absent"), envelope)
+	require.NoError(t, err)
+	require.Equal(t, "kek", string(plain))
+	require.Equal(t, passphrase, string(used))
+
+	chosen := "abandon ability able about above absent"
+	envelope, err = encryptKEK([]byte(chosen), []byte("kek"))
+	require.NoError(t, err)
+	_, used, err = openKEK([]byte(chosen), envelope)
+	require.NoError(t, err)
+	require.Equal(t, chosen, string(used))
+
+	_, _, err = openKEK([]byte("abandon ability able about above above"), envelope)
+	require.ErrorIs(t, err, errWrongPassword)
+}
+
+func TestRandomPositionsAreDistinctSortedAndInRange(t *testing.T) {
+	for range 200 {
+		positions, err := randomPositions(rand.Reader, 6, 3)
+		require.NoError(t, err)
+		require.Len(t, positions, 3)
+		require.True(t, positions[0] >= 0 && positions[0] < positions[1] && positions[1] < positions[2] && positions[2] < 6)
+	}
+}

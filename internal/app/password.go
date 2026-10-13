@@ -10,9 +10,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"sort"
 	"strconv"
+	"strings"
+	"syscall"
+	"unicode"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,6 +30,7 @@ const (
 	passwordKDFTime      = 3
 	passwordKDFMemoryKiB = 64 * 1024
 	passwordKDFThreads   = 4
+	passphraseCheckWords = 3
 )
 
 // encryptedKEK is an encrypted, versioned representation of the hex storage
@@ -112,6 +119,144 @@ func (a *App) readPassword(confirm bool) (result []byte, resultErr error) {
 	}
 }
 
+// newStoragePassword generates a six-word passphrase for a fresh install typed at
+// a terminal; passwords supplied by environment or descriptor are used as given.
+func (a *App) newStoragePassword() ([]byte, error) {
+	if a.password != nil || !a.typedPassword() {
+		return a.readPassword(true)
+	}
+	passphrase, err := generatePassphrase(a.Random)
+	if err != nil {
+		return nil, err
+	}
+	file := a.In.(*os.File)
+	// The alternate screen never enters scrollback, so neither the passphrase
+	// nor the confirmation words outlive this prompt.
+	if a.interactive() {
+		defer a.altScreen(file)()
+	}
+	if err := a.showStoragePassphrase(passphrase, file); err != nil {
+		return nil, fmt.Errorf("show storage encryption passphrase: %w", err)
+	}
+	if err := a.confirmPassphraseWords(passphrase, file); err != nil {
+		return nil, fmt.Errorf("confirm storage encryption passphrase: %w", err)
+	}
+	a.password = []byte(passphrase)
+	return []byte(passphrase), nil
+}
+
+func (a *App) showStoragePassphrase(passphrase string, file *os.File) error {
+	warn, bold, reset := "", "", ""
+	if a.interactive() {
+		warn, bold, reset = ansiOrange+ansiBold, ansiBold, ansiReset
+	}
+	fmt.Fprintf(a.Out, "\n%s⚠  BACK UP YOUR STORAGE PASSPHRASE NOW%s\n\n    %s%s%s\n\n", warn, reset, bold, passphrase, reset)
+	fmt.Fprintf(a.Out, "%sWrite it on paper or save it in a secure password manager. It is shown only once and never stored.\n"+
+		"Without it the encrypted MPC key shares on this host can't be decrypted, and the Cosigner can't start or export them.%s\n\n", warn, reset)
+	if !a.interactive() {
+		return nil
+	}
+	fmt.Fprint(a.Out, "Press Enter once it's saved; it will be cleared from the screen. ")
+	enter, err := readHidden(file)
+	clear(enter)
+	fmt.Fprint(a.Out, "\x1b[H\x1b[2J")
+	return err
+}
+
+// confirmPassphraseWords checks the backup by asking for randomly chosen words,
+// one per prompt, instead of the whole passphrase.
+func (a *App) confirmPassphraseWords(passphrase string, file *os.File) error {
+	words := strings.Split(passphrase, "-")
+	positions, err := randomPositions(a.Random, len(words), passphraseCheckWords)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.Out, "\nConfirm your backup: enter %d words from your passphrase.\n\n", len(positions))
+	for _, i := range positions {
+		for {
+			fmt.Fprintf(a.Out, "Word #%d: ", i+1)
+			var typed []byte
+			if a.interactive() {
+				typed, err = readLine(file)
+			} else {
+				typed, err = readHidden(file)
+				fmt.Fprintln(a.Out)
+			}
+			if err != nil {
+				return err
+			}
+			match := strings.EqualFold(string(bytes.TrimSpace(typed)), words[i])
+			clear(typed)
+			if match {
+				break
+			}
+			fmt.Fprintln(a.Out, "That doesn't match; check your backup and try again (Ctrl-C to quit).")
+		}
+	}
+	return nil
+}
+
+// randomPositions returns k distinct indexes below n in ascending order.
+func randomPositions(random io.Reader, n, k int) ([]int, error) {
+	all := make([]int, n)
+	for i := range all {
+		all[i] = i
+	}
+	for i := 0; i < k; i++ {
+		j, err := randomIndex(random, n-i)
+		if err != nil {
+			return nil, err
+		}
+		all[i], all[i+j] = all[i+j], all[i]
+	}
+	picked := all[:k]
+	sort.Ints(picked)
+	return picked, nil
+}
+
+// readLine reads one echoed line a byte at a time, so nothing past the newline
+// is buffered away from later prompts.
+func readLine(file *os.File) ([]byte, error) {
+	var line []byte
+	b := make([]byte, 1)
+	for len(line) < 256 {
+		if _, err := file.Read(b); err != nil {
+			clear(line)
+			return nil, err
+		}
+		if b[0] == '\n' {
+			break
+		}
+		line = append(line, b[0])
+	}
+	return bytes.TrimSuffix(line, []byte("\r")), nil
+}
+
+// altScreen switches to the alternate screen and returns a func that switches
+// back; Ctrl-C also switches back so the passphrase isn't left on screen.
+func (a *App) altScreen(file *os.File) func() {
+	state, _ := term.GetState(int(file.Fd()))
+	fmt.Fprint(a.Out, "\x1b[?1049h\x1b[H\x1b[2J")
+	sig, done := make(chan os.Signal, 1), make(chan struct{})
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sig:
+			fmt.Fprint(a.Out, "\x1b[2J\x1b[?1049l")
+			if state != nil {
+				_ = term.Restore(int(file.Fd()), state)
+			}
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sig)
+		close(done)
+		fmt.Fprint(a.Out, "\x1b[2J\x1b[?1049l")
+	}
+}
+
 func encryptKEK(password, plaintext []byte) ([]byte, error) {
 	if len(password) == 0 {
 		return nil, errors.New("storage encryption password is required")
@@ -194,12 +339,11 @@ func (a *App) storagePassword(envelope []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		plain, err := decryptKEK(password, envelope)
+		plain, used, err := openKEK(password, envelope)
 		clear(plain)
 		if err == nil {
-			return password, nil
+			return used, nil
 		}
-		clear(password)
 		if !errors.Is(err, errWrongPassword) || !a.typedPassword() {
 			return nil, err
 		}
@@ -207,6 +351,43 @@ func (a *App) storagePassword(envelope []byte) ([]byte, error) {
 		a.password = nil
 		fmt.Fprintln(a.Out, "Wrong password; try again (Ctrl-C to quit).")
 	}
+}
+
+// openKEK tries the password exactly as given first, so chosen passwords keep
+// working, then as a generated passphrase typed with spaces or capitals.
+func openKEK(password, envelope []byte) (plain, used []byte, err error) {
+	plain, err = decryptKEK(password, envelope)
+	if err == nil {
+		return plain, password, nil
+	}
+	normalized := normalizePassphrase(password)
+	if !errors.Is(err, errWrongPassword) || normalized == nil || bytes.Equal(normalized, password) {
+		clear(password)
+		clear(normalized)
+		return nil, nil, err
+	}
+	clear(password)
+	plain, err = decryptKEK(normalized, envelope)
+	if err != nil {
+		clear(normalized)
+		return nil, nil, err
+	}
+	return plain, normalized, nil
+}
+
+// normalizePassphrase returns the canonical hyphenated form of a generated
+// passphrase, or nil if the input isn't six wordlist words.
+func normalizePassphrase(input []byte) []byte {
+	words := strings.FieldsFunc(strings.ToLower(string(input)), func(r rune) bool { return r == '-' || unicode.IsSpace(r) })
+	if len(words) != msharePassphraseLen {
+		return nil
+	}
+	for _, w := range words {
+		if i := sort.SearchStrings(wordlist, w); i == len(wordlist) || wordlist[i] != w {
+			return nil
+		}
+	}
+	return []byte(strings.Join(words, "-"))
 }
 
 func (a *App) typedPassword() bool {
