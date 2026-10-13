@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode"
 
@@ -89,14 +90,14 @@ func (a *App) readPassword(confirm bool) (result []byte, resultErr error) {
 		return nil, fmt.Errorf("%s is required in non-interactive mode", passwordEnv)
 	}
 	for {
-		fmt.Fprint(a.Out, "Storage encryption password: ")
+		fmt.Fprint(a.Out, "Storage encryption passphrase: ")
 		password, err := readHidden(file)
 		fmt.Fprintln(a.Out)
 		if err != nil {
-			return nil, fmt.Errorf("read storage encryption password: %w", err)
+			return nil, fmt.Errorf("read storage encryption passphrase: %w", err)
 		}
 		if len(password) == 0 {
-			fmt.Fprintln(a.Out, "Password can't be empty; try again (Ctrl-C to quit).")
+			fmt.Fprintln(a.Out, "Passphrase can't be empty; try again (Ctrl-C to quit).")
 			continue
 		}
 		if !confirm {
@@ -130,57 +131,60 @@ func (a *App) newStoragePassword() ([]byte, error) {
 		return nil, err
 	}
 	file := a.In.(*os.File)
-	// The alternate screen never enters scrollback, so neither the passphrase
-	// nor the confirmation words outlive this prompt.
-	if a.interactive() {
-		defer a.altScreen(file)()
-	}
-	if err := a.showStoragePassphrase(passphrase, file); err != nil {
+	block := &screenBlock{out: a.Out, erasable: a.interactive()}
+	defer block.erase()
+	defer a.onInterrupt(file, block.erase)()
+	if err := a.showStoragePassphrase(passphrase, file, block); err != nil {
 		return nil, fmt.Errorf("show storage encryption passphrase: %w", err)
 	}
-	if err := a.confirmPassphraseWords(passphrase, file); err != nil {
+	if err := a.confirmPassphraseWords(passphrase, file, block); err != nil {
 		return nil, fmt.Errorf("confirm storage encryption passphrase: %w", err)
 	}
+	block.erase()
+	a.success("Storage passphrase backed up")
 	a.password = []byte(passphrase)
 	return []byte(passphrase), nil
 }
 
-func (a *App) showStoragePassphrase(passphrase string, file *os.File) error {
+func (a *App) showStoragePassphrase(passphrase string, file *os.File, block *screenBlock) error {
 	warn, bold, reset := "", "", ""
-	if a.interactive() {
+	if block.erasable {
 		warn, bold, reset = ansiOrange+ansiBold, ansiBold, ansiReset
 	}
-	fmt.Fprintf(a.Out, "\n%s⚠  BACK UP YOUR STORAGE PASSPHRASE NOW%s\n\n    %s%s%s\n\n", warn, reset, bold, passphrase, reset)
-	fmt.Fprintf(a.Out, "%sWrite it on paper or save it in a secure password manager. It is shown only once and never stored.\n"+
-		"Without it the encrypted MPC key shares on this host can't be decrypted, and the Cosigner can't start or export them.%s\n\n", warn, reset)
-	if !a.interactive() {
+	block.printf("\n%s⚠  BACK UP YOUR STORAGE PASSPHRASE NOW%s\n\n    %s%s%s\n\n", warn, reset, bold, passphrase, reset)
+	block.printf("%sWrite it on paper or save it in a secure password manager.\n"+
+		"It is shown only once and never stored. Without it the encrypted\n"+
+		"MPC key shares on this host can't be decrypted, and the Cosigner\n"+
+		"can't start or export them.%s\n\n", warn, reset)
+	if !block.erasable {
 		return nil
 	}
-	fmt.Fprint(a.Out, "Press Enter once it's saved; it will be cleared from the screen. ")
+	block.printf("Press Enter once it's saved; it will be cleared from the screen. ")
 	enter, err := readHidden(file)
 	clear(enter)
-	fmt.Fprint(a.Out, "\x1b[H\x1b[2J")
+	block.erase()
 	return err
 }
 
 // confirmPassphraseWords checks the backup by asking for randomly chosen words,
 // one per prompt, instead of the whole passphrase.
-func (a *App) confirmPassphraseWords(passphrase string, file *os.File) error {
+func (a *App) confirmPassphraseWords(passphrase string, file *os.File, block *screenBlock) error {
 	words := strings.Split(passphrase, "-")
 	positions, err := randomPositions(a.Random, len(words), passphraseCheckWords)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Out, "\nConfirm your backup: enter %d words from your passphrase.\n\n", len(positions))
+	block.printf("\nConfirm your backup: enter %d words from your passphrase.\n\n", len(positions))
 	for _, i := range positions {
 		for {
-			fmt.Fprintf(a.Out, "Word #%d: ", i+1)
+			block.printf("Word #%d: ", i+1)
 			var typed []byte
-			if a.interactive() {
+			if block.erasable {
 				typed, err = readLine(file)
+				block.echoed()
 			} else {
 				typed, err = readHidden(file)
-				fmt.Fprintln(a.Out)
+				block.printf("\n")
 			}
 			if err != nil {
 				return err
@@ -190,7 +194,7 @@ func (a *App) confirmPassphraseWords(passphrase string, file *os.File) error {
 			if match {
 				break
 			}
-			fmt.Fprintln(a.Out, "That doesn't match; check your backup and try again (Ctrl-C to quit).")
+			block.printf("That doesn't match; check your backup and try again (Ctrl-C to quit).\n")
 		}
 	}
 	return nil
@@ -232,17 +236,54 @@ func readLine(file *os.File) ([]byte, error) {
 	return bytes.TrimSuffix(line, []byte("\r")), nil
 }
 
-// altScreen switches to the alternate screen and returns a func that switches
-// back; Ctrl-C also switches back so the passphrase isn't left on screen.
-func (a *App) altScreen(file *os.File) func() {
+// screenBlock counts the lines a prompt prints so they can be erased in place;
+// while they fit on screen, none of them reach scrollback.
+type screenBlock struct {
+	mu       sync.Mutex
+	out      io.Writer
+	erasable bool
+	lines    int
+}
+
+func (b *screenBlock) printf(format string, args ...any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	text := fmt.Sprintf(format, args...)
+	b.lines += strings.Count(text, "\n")
+	fmt.Fprint(b.out, text)
+}
+
+// echoed records a line break the terminal echoed for typed input.
+func (b *screenBlock) echoed() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lines++
+}
+
+func (b *screenBlock) erase() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.erasable {
+		return
+	}
+	if b.lines > 0 {
+		fmt.Fprintf(b.out, "\x1b[%dF\x1b[J", b.lines)
+	} else {
+		fmt.Fprint(b.out, "\r\x1b[J")
+	}
+	b.lines = 0
+}
+
+// onInterrupt runs cleanup and restores the terminal if Ctrl-C arrives before
+// the returned func is called.
+func (a *App) onInterrupt(file *os.File, cleanup func()) func() {
 	state, _ := term.GetState(int(file.Fd()))
-	fmt.Fprint(a.Out, "\x1b[?1049h\x1b[H\x1b[2J")
 	sig, done := make(chan os.Signal, 1), make(chan struct{})
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		select {
 		case <-sig:
-			fmt.Fprint(a.Out, "\x1b[2J\x1b[?1049l")
+			cleanup()
 			if state != nil {
 				_ = term.Restore(int(file.Fd()), state)
 			}
@@ -253,7 +294,6 @@ func (a *App) altScreen(file *os.File) func() {
 	return func() {
 		signal.Stop(sig)
 		close(done)
-		fmt.Fprint(a.Out, "\x1b[2J\x1b[?1049l")
 	}
 }
 
@@ -328,7 +368,7 @@ func decryptKEK(password, raw []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-var errWrongPassword = errors.New("could not decrypt storage key; check the password")
+var errWrongPassword = errors.New("could not decrypt storage key; check the passphrase")
 
 // storagePassword returns a password that opens the envelope. A password typed
 // at a terminal is asked for again until it is right; one supplied by
@@ -349,7 +389,7 @@ func (a *App) storagePassword(envelope []byte) ([]byte, error) {
 		}
 		clear(a.password)
 		a.password = nil
-		fmt.Fprintln(a.Out, "Wrong password; try again (Ctrl-C to quit).")
+		fmt.Fprintln(a.Out, "Wrong passphrase; try again (Ctrl-C to quit).")
 	}
 }
 
