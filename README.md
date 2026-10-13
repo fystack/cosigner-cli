@@ -297,3 +297,7 @@ signed `install.sh` and serves it unchanged, so installer changes ship with the 
 The installer must stay POSIX `sh`: `curl | sh` runs it under `dash` on Debian and Ubuntu. To bump the
 cosign it installs when a host has none, update [`scripts/cosign.env`](scripts/cosign.env) from that
 cosign release's `cosign_checksums.txt` and run `scripts/check-cosign-pin.sh`.
+
+## License
+
+Copyright 2026 Fystack. Licensed under the [Apache License, Version 2.0](LICENSE).
