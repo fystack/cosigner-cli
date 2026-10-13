@@ -242,3 +242,12 @@ func TestOpenKEKAcceptsSpacedPassphraseAndExactPasswords(t *testing.T) {
 	_, _, err = openKEK([]byte("abandon ability able about above above"), envelope)
 	require.ErrorIs(t, err, errWrongPassword)
 }
+
+func TestRandomPositionsAreDistinctSortedAndInRange(t *testing.T) {
+	for range 200 {
+		positions, err := randomPositions(rand.Reader, 6, 3)
+		require.NoError(t, err)
+		require.Len(t, positions, 3)
+		require.True(t, positions[0] >= 0 && positions[0] < positions[1] && positions[1] < positions[2] && positions[2] < 6)
+	}
+}

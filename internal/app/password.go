@@ -30,6 +30,7 @@ const (
 	passwordKDFTime      = 3
 	passwordKDFMemoryKiB = 64 * 1024
 	passwordKDFThreads   = 4
+	passphraseCheckWords = 3
 )
 
 // encryptedKEK is an encrypted, versioned representation of the hex storage
@@ -129,35 +130,25 @@ func (a *App) newStoragePassword() ([]byte, error) {
 		return nil, err
 	}
 	file := a.In.(*os.File)
+	// The alternate screen never enters scrollback, so neither the passphrase
+	// nor the confirmation words outlive this prompt.
+	if a.interactive() {
+		defer a.altScreen(file)()
+	}
 	if err := a.showStoragePassphrase(passphrase, file); err != nil {
 		return nil, fmt.Errorf("show storage encryption passphrase: %w", err)
 	}
-	for {
-		fmt.Fprint(a.Out, "Type the passphrase to confirm you saved it: ")
-		typed, err := readHidden(file)
-		fmt.Fprintln(a.Out)
-		if err != nil {
-			return nil, fmt.Errorf("confirm storage encryption passphrase: %w", err)
-		}
-		normalized := normalizePassphrase(typed)
-		match := bytes.Equal(normalized, []byte(passphrase))
-		clear(typed)
-		clear(normalized)
-		if match {
-			a.password = []byte(passphrase)
-			return []byte(passphrase), nil
-		}
-		fmt.Fprintln(a.Out, "That doesn't match; check your backup and try again (Ctrl-C to quit).")
+	if err := a.confirmPassphraseWords(passphrase, file); err != nil {
+		return nil, fmt.Errorf("confirm storage encryption passphrase: %w", err)
 	}
+	a.password = []byte(passphrase)
+	return []byte(passphrase), nil
 }
 
-// showStoragePassphrase draws the passphrase on the alternate screen, which never
-// enters scrollback, and clears it once the operator presses Enter.
 func (a *App) showStoragePassphrase(passphrase string, file *os.File) error {
 	warn, bold, reset := "", "", ""
 	if a.interactive() {
 		warn, bold, reset = ansiOrange+ansiBold, ansiBold, ansiReset
-		defer a.altScreen(file)()
 	}
 	fmt.Fprintf(a.Out, "\n%s⚠  BACK UP YOUR STORAGE PASSPHRASE NOW%s\n\n    %s%s%s\n\n", warn, reset, bold, passphrase, reset)
 	fmt.Fprintf(a.Out, "%sWrite it on paper or save it in a secure password manager. It is shown only once and never stored.\n"+
@@ -168,7 +159,77 @@ func (a *App) showStoragePassphrase(passphrase string, file *os.File) error {
 	fmt.Fprint(a.Out, "Press Enter once it's saved; it will be cleared from the screen. ")
 	enter, err := readHidden(file)
 	clear(enter)
+	fmt.Fprint(a.Out, "\x1b[H\x1b[2J")
 	return err
+}
+
+// confirmPassphraseWords checks the backup by asking for randomly chosen words,
+// one per prompt, instead of the whole passphrase.
+func (a *App) confirmPassphraseWords(passphrase string, file *os.File) error {
+	words := strings.Split(passphrase, "-")
+	positions, err := randomPositions(a.Random, len(words), passphraseCheckWords)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.Out, "\nConfirm your backup: enter %d words from your passphrase.\n\n", len(positions))
+	for _, i := range positions {
+		for {
+			fmt.Fprintf(a.Out, "Word #%d: ", i+1)
+			var typed []byte
+			if a.interactive() {
+				typed, err = readLine(file)
+			} else {
+				typed, err = readHidden(file)
+				fmt.Fprintln(a.Out)
+			}
+			if err != nil {
+				return err
+			}
+			match := strings.EqualFold(string(bytes.TrimSpace(typed)), words[i])
+			clear(typed)
+			if match {
+				break
+			}
+			fmt.Fprintln(a.Out, "That doesn't match; check your backup and try again (Ctrl-C to quit).")
+		}
+	}
+	return nil
+}
+
+// randomPositions returns k distinct indexes below n in ascending order.
+func randomPositions(random io.Reader, n, k int) ([]int, error) {
+	all := make([]int, n)
+	for i := range all {
+		all[i] = i
+	}
+	for i := 0; i < k; i++ {
+		j, err := randomIndex(random, n-i)
+		if err != nil {
+			return nil, err
+		}
+		all[i], all[i+j] = all[i+j], all[i]
+	}
+	picked := all[:k]
+	sort.Ints(picked)
+	return picked, nil
+}
+
+// readLine reads one echoed line a byte at a time, so nothing past the newline
+// is buffered away from later prompts.
+func readLine(file *os.File) ([]byte, error) {
+	var line []byte
+	b := make([]byte, 1)
+	for len(line) < 256 {
+		if _, err := file.Read(b); err != nil {
+			clear(line)
+			return nil, err
+		}
+		if b[0] == '\n' {
+			break
+		}
+		line = append(line, b[0])
+	}
+	return bytes.TrimSuffix(line, []byte("\r")), nil
 }
 
 // altScreen switches to the alternate screen and returns a func that switches
