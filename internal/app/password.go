@@ -10,12 +10,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -125,8 +128,10 @@ func (a *App) newStoragePassword() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.showStoragePassphrase(passphrase)
 	file := a.In.(*os.File)
+	if err := a.showStoragePassphrase(passphrase, file); err != nil {
+		return nil, fmt.Errorf("show storage encryption passphrase: %w", err)
+	}
 	for {
 		fmt.Fprint(a.Out, "Type the passphrase to confirm you saved it: ")
 		typed, err := readHidden(file)
@@ -146,14 +151,49 @@ func (a *App) newStoragePassword() ([]byte, error) {
 	}
 }
 
-func (a *App) showStoragePassphrase(passphrase string) {
+// showStoragePassphrase draws the passphrase on the alternate screen, which never
+// enters scrollback, and clears it once the operator presses Enter.
+func (a *App) showStoragePassphrase(passphrase string, file *os.File) error {
 	warn, bold, reset := "", "", ""
 	if a.interactive() {
 		warn, bold, reset = ansiOrange+ansiBold, ansiBold, ansiReset
+		defer a.altScreen(file)()
 	}
 	fmt.Fprintf(a.Out, "\n%s⚠  BACK UP YOUR STORAGE PASSPHRASE NOW%s\n\n    %s%s%s\n\n", warn, reset, bold, passphrase, reset)
 	fmt.Fprintf(a.Out, "%sWrite it on paper or save it in a secure password manager. It is shown only once and never stored.\n"+
 		"Without it the encrypted MPC key shares on this host can't be decrypted, and the Cosigner can't start or export them.%s\n\n", warn, reset)
+	if !a.interactive() {
+		return nil
+	}
+	fmt.Fprint(a.Out, "Press Enter once it's saved; it will be cleared from the screen. ")
+	enter, err := readHidden(file)
+	clear(enter)
+	return err
+}
+
+// altScreen switches to the alternate screen and returns a func that switches
+// back; Ctrl-C also switches back so the passphrase isn't left on screen.
+func (a *App) altScreen(file *os.File) func() {
+	state, _ := term.GetState(int(file.Fd()))
+	fmt.Fprint(a.Out, "\x1b[?1049h\x1b[H\x1b[2J")
+	sig, done := make(chan os.Signal, 1), make(chan struct{})
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sig:
+			fmt.Fprint(a.Out, "\x1b[2J\x1b[?1049l")
+			if state != nil {
+				_ = term.Restore(int(file.Fd()), state)
+			}
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sig)
+		close(done)
+		fmt.Fprint(a.Out, "\x1b[2J\x1b[?1049l")
+	}
 }
 
 func encryptKEK(password, plaintext []byte) ([]byte, error) {
