@@ -25,8 +25,10 @@ import (
 
 const (
 	DefaultApexEndpoint = "https://api.enterprise-sandbox.fystack.io"
-	defaultTokenMax     = 4096
-	operatorSchema      = 2
+	// ProductionApexEndpoint is listed in the setup menu but not selectable yet.
+	ProductionApexEndpoint = "https://api.fystack.io"
+	defaultTokenMax        = 4096
+	operatorSchema         = 2
 )
 
 //go:embed docker-compose.yaml
@@ -34,6 +36,9 @@ var templates embed.FS
 
 //go:embed assets/banner
 var banner string
+
+//go:embed assets/logo
+var logo string
 
 type Settings struct {
 	SchemaVersion  int    `yaml:"schema_version"`
@@ -117,10 +122,31 @@ func (a *App) printBanner() {
 	if !ok || !isTerminal(file) {
 		return
 	}
-	const cyan = "\x1b[38;5;45m"
-	const bold = "\x1b[1m"
+	// Fystack brand blue for the logo and the letters' shadow edges; white faces.
+	const blue = "\x1b[38;2;59;130;246m"
+	const white = "\x1b[1;97m"
 	const reset = "\x1b[0m"
-	fmt.Fprint(a.Out, cyan+bold+"\n"+banner+"\n"+reset)
+	icon := strings.Split(strings.TrimRight(logo, "\n"), "\n")
+	fmt.Fprintln(a.Out)
+	for i, line := range strings.Split(strings.TrimRight(banner, "\n"), "\n") {
+		var mark string
+		if i < len(icon) {
+			mark = icon[i]
+		}
+		var text strings.Builder
+		for _, r := range strings.TrimRight(line, " ") {
+			switch r {
+			case '█':
+				text.WriteString(white + "█" + reset)
+			case ' ':
+				text.WriteRune(r)
+			default:
+				text.WriteString(blue + string(r) + reset)
+			}
+		}
+		fmt.Fprintf(a.Out, "%s%-11s%s   %s\n", blue, mark, reset, text.String())
+	}
+	fmt.Fprintln(a.Out)
 }
 
 func (a *App) home(cmd *cobra.Command) (string, error) {

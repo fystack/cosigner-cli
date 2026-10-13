@@ -160,7 +160,7 @@ func TestExportListAndWrongPassword(t *testing.T) {
 	l = seedExportHome(t, a, "other password", map[string][]byte{"shares:EdDSA:wallet-1": eddsaShareBlob(t)})
 	cmd = a.Command()
 	cmd.SetArgs([]string{"--home", l.home, "export", "--list"})
-	assert.ErrorContains(t, cmd.Execute(), "check the password")
+	assert.ErrorContains(t, cmd.Execute(), "check the passphrase")
 }
 
 func TestExportRejectsUnknownWallet(t *testing.T) {

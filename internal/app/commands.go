@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -200,22 +199,36 @@ func (a *App) preflight(ctx context.Context, docker string) error {
 	})
 }
 
-// promptEndpoint lets an interactive operator review the Apex endpoint on a
-// fresh setup; non-interactive runs keep the default.
+// promptEndpoint lets an interactive operator pick the Fystack environment or
+// enter a custom endpoint on a fresh setup; non-interactive runs keep the default.
 func (a *App) promptEndpoint(defaultValue string) (string, error) {
 	file, ok := a.In.(*os.File)
 	if !ok || !isTerminal(file) {
 		return defaultValue, nil
 	}
-	fmt.Fprintf(a.Out, "Fystack Endpoint (Optional) [%s]: ", defaultValue)
-	value, err := bufio.NewReader(file).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("read Apex endpoint: %w", err)
+	const custom = 2
+	options := []menuOption{
+		{Label: fmt.Sprintf("Sandbox      %s", defaultValue)},
+		{Label: fmt.Sprintf("Production   %s  (coming soon)", ProductionApexEndpoint), Disabled: true},
+		{Label: "Custom endpoint"},
 	}
-	if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
-		return value, nil
+	choice, err := a.choose(file, "Fystack environment", options)
+	if err != nil {
+		return "", fmt.Errorf("read Fystack environment: %w", err)
 	}
-	return defaultValue, nil
+	if choice != custom {
+		return defaultValue, nil
+	}
+	for {
+		fmt.Fprint(a.Out, "Custom endpoint: ")
+		value, err := readLine(file)
+		if err != nil {
+			return "", fmt.Errorf("read Fystack endpoint: %w", err)
+		}
+		if endpoint := strings.TrimRight(strings.TrimSpace(string(value)), "/"); endpoint != "" {
+			return endpoint, nil
+		}
+	}
 }
 func (a *App) provision(l layout, s Settings, configPath string) error {
 	for _, dir := range []string{l.state, filepath.Join(l.home, "secrets")} {
