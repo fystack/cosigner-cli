@@ -91,12 +91,18 @@ func openRecovery(password, blob []byte) ([]byte, error) {
 	return plain, nil
 }
 
+// legacyComposePath is the compose file that older archives carried. It is
+// accepted so those archives still restore, but never installed: the compose
+// file decides what runs on the host, so restore regenerates it from the
+// template of the running CLI instead of trusting the archive.
+const legacyComposePath = "docker-compose.yaml"
+
 func allowedRecoveryPath(path string) bool {
 	if !filepath.IsLocal(path) || filepath.ToSlash(filepath.Clean(path)) != path || strings.Contains(path, "\\") {
 		return false
 	}
 	switch path {
-	case "config.yaml", "cosigner-cli.yaml", "docker-compose.yaml":
+	case "config.yaml", "cosigner-cli.yaml", legacyComposePath:
 		return true
 	}
 	return strings.HasPrefix(path, "state/") || strings.HasPrefix(path, "secrets/")
@@ -104,10 +110,11 @@ func allowedRecoveryPath(path string) bool {
 
 // snapshotInstallation requires both the operator lock and the database lock.
 // The latter is shared with the runtime's SQLite backend, including direct runs.
+// It archives data only; the compose file is CLI output and is regenerated on restore.
 func snapshotInstallation(l layout, s Settings) (recoveryBundle, error) {
 	bundle := recoveryBundle{Version: 2, CreatedAt: time.Now().UTC(), Image: s.Image}
 	var total int64
-	for _, root := range []string{"config.yaml", "cosigner-cli.yaml", "docker-compose.yaml", "state", "secrets"} {
+	for _, root := range []string{"config.yaml", "cosigner-cli.yaml", "state", "secrets"} {
 		err := filepath.WalkDir(filepath.Join(l.home, root), func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
@@ -240,6 +247,11 @@ func (a *App) restoreCommand() *cobra.Command {
 				return errors.New("restore requires an empty instance directory; existing state is never overwritten")
 			}
 		}
+		// The archive names the image that start will run, so its signature is
+		// checked before the restored settings are published. Fail before any prompt.
+		if err := a.cosignOK(c.Context()); err != nil {
+			return err
+		}
 		input, _ := c.Flags().GetString("in")
 		f, err := os.Open(input)
 		if err != nil {
@@ -274,9 +286,19 @@ func (a *App) restoreCommand() *cobra.Command {
 		}
 		defer os.RemoveAll(stage)
 		for _, file := range bundle.Files {
+			if file.Path == legacyComposePath {
+				continue
+			}
 			if err := atomicWrite(filepath.Join(stage, filepath.FromSlash(file.Path)), file.Data, 0600); err != nil {
 				return err
 			}
+		}
+		compose, err := templates.ReadFile("docker-compose.yaml")
+		if err != nil {
+			return err
+		}
+		if err := atomicWrite(a.layout(stage).compose(), compose, 0600); err != nil {
+			return err
 		}
 		s, err := loadSettings(stage)
 		if err != nil {
@@ -288,7 +310,16 @@ func (a *App) restoreCommand() *cobra.Command {
 		if err := validatePaired(a.layout(stage), s); err != nil {
 			return err
 		}
+		if err := a.verifyImage(c.Context(), s.Image); err != nil {
+			return err
+		}
 		s.ProjectName = projectName(home)
+		// The Docker command is host configuration, not recovery data: take it
+		// from this host, never from the archive.
+		s.Docker = "docker"
+		if docker, _ := c.Flags().GetString("docker"); docker != "" {
+			s.Docker = docker
+		}
 		if err := saveSettings(stage, s); err != nil {
 			return err
 		}
@@ -327,7 +358,7 @@ func validateBundle(b recoveryBundle) error {
 			return fmt.Errorf("archive checksum mismatch: %s", f.Path)
 		}
 	}
-	for _, path := range []string{"config.yaml", "cosigner-cli.yaml", "docker-compose.yaml", "state/cosigner.key", "state/cosigner.pub", "state/pairing.yaml", "state/data/cosigner.db"} {
+	for _, path := range []string{"config.yaml", "cosigner-cli.yaml", "state/cosigner.key", "state/cosigner.pub", "state/pairing.yaml", "state/data/cosigner.db"} {
 		if !seen[path] {
 			return fmt.Errorf("archive is missing %s", path)
 		}

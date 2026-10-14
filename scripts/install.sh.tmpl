@@ -294,6 +294,35 @@ check_docker() {
   fi
 }
 
+# Another release: hand over to that release's own installer, which carries
+# that release's checksums. It runs with this installer's privileges, so it must
+# pass the same signature check as a binary before it runs.
+hand_over() {
+  case "$REQUESTED_VERSION" in v*) ;; *) REQUESTED_VERSION="v$REQUESTED_VERSION" ;; esac
+  printf '%s' "$REQUESTED_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    || die "invalid version $REQUESTED_VERSION (expected vX.Y.Z)"
+  detect_platform
+  choose_install_dir
+  ensure_cosign
+
+  step "Fetching the installer for $REQUESTED_VERSION"
+  base="https://github.com/$REPOSITORY/releases/download/$REQUESTED_VERSION"
+  for file in install.sh install.sh.sigstore.json; do
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --location \
+      --output "$TMP/$file" "$base/$file" \
+      || die "release $REQUESTED_VERSION has no signed installer. See $BASE_URL for available versions."
+  done
+  "$COSIGN" verify-blob "$TMP/install.sh" \
+    --bundle "$TMP/install.sh.sigstore.json" \
+    --certificate-identity "https://github.com/$REPOSITORY/.github/workflows/release.yml@refs/tags/$REQUESTED_VERSION" \
+    --certificate-oidc-issuer "$OIDC_ISSUER" >/dev/null 2>"$TMP/cosign.log" \
+    || { cat "$TMP/cosign.log" >&2; die "signature verification failed for the $REQUESTED_VERSION installer. Refusing to run it."; }
+  ok "installer signature verified (built by $REPOSITORY release workflow for $REQUESTED_VERSION)"
+
+  # shellcheck disable=SC2086 # FORWARD is empty or a single flag
+  sh "$TMP/install.sh" --dir "$INSTALL_DIR" $FORWARD
+}
+
 # ------------------------------------------------------------------ main ----
 
 main() {
@@ -321,26 +350,8 @@ main() {
   TMP="$(mktemp -d 2>/dev/null || mktemp -d -t cosigner-cli)"
   trap 'rm -rf -- "$TMP"' EXIT INT TERM
 
-  # Another release: hand over to that release's own installer, which carries
-  # that release's checksums.
   if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "$VERSION" ]; then
-    case "$REQUESTED_VERSION" in v*) ;; *) REQUESTED_VERSION="v$REQUESTED_VERSION" ;; esac
-    printf '%s' "$REQUESTED_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-      || die "invalid version $REQUESTED_VERSION (expected vX.Y.Z)"
-    step "Fetching the installer for $REQUESTED_VERSION"
-    curl --proto '=https' --tlsv1.2 --fail --silent --location \
-      --output "$TMP/install.sh" "$BASE_URL/$REQUESTED_VERSION/install.sh" \
-      || die "release $REQUESTED_VERSION not found. See $BASE_URL for available versions."
-    # Hosts can answer unknown paths with an HTML page. Only run the file if
-    # it is the installer for exactly that release.
-    grep -qx "VERSION=\"$REQUESTED_VERSION\"" "$TMP/install.sh" \
-      || die "release $REQUESTED_VERSION not found. See $BASE_URL for available versions."
-    # shellcheck disable=SC2086 # FORWARD is empty or a single flag
-    if [ -n "$INSTALL_DIR" ]; then
-      sh "$TMP/install.sh" --dir "$INSTALL_DIR" $FORWARD
-    else
-      sh "$TMP/install.sh" $FORWARD
-    fi
+    hand_over
     exit $?
   fi
 

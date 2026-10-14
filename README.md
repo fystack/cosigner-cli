@@ -76,21 +76,9 @@ All three should print a version. If `docker` fails with a permission error on L
 
 ## Install
 
-```bash
-curl -sSL https://cosigner.fystack.io/install.sh | sh
-```
-
-The installer installs cosign if it's missing, then checks `cosigner-cli` against the signed release
-checksums and its Sigstore signature before installing it to `/usr/local/bin`. It also checks Docker and
-tells you what to fix. To pin a version or install directory:
-
-```bash
-curl -sSL https://cosigner.fystack.io/install.sh | sh -s -- --version v1.2.3 --dir /opt/cosigner-cli/bin
-```
-
-[cosigner.fystack.io](https://cosigner.fystack.io) lists every release with its checksums and shows how
-to verify the installer by hand before running it. Each release's `install.sh` is built and signed by
-this repository's release workflow, so you can also check it with cosign before running it:
+This host will hold a share of your wallet keys, so verify the installer before you run it. Each
+release's `install.sh` is built from [`scripts/install.sh.tmpl`](scripts/install.sh.tmpl) and signed by
+this repository's release workflow. Download it, check the signature with cosign, then run it:
 
 ```bash
 V=v1.2.3
@@ -100,6 +88,21 @@ cosign verify-blob install.sh --bundle install.sh.sigstore.json \
   --certificate-identity "https://github.com/fystack/cosigner-cli/.github/workflows/release.yml@refs/tags/$V" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 sh install.sh
+```
+
+Run `sh install.sh` only if `cosign verify-blob` prints `Verified OK`. The installer then checks
+`cosigner-cli` against the SHA-256 pinned in the script and its Sigstore signature before it installs it
+to `/usr/local/bin`. It also checks Docker and tells you what to fix. To set the install directory, run
+`sh install.sh --dir /opt/cosigner-cli/bin`.
+
+[cosigner.fystack.io](https://cosigner.fystack.io) lists every release with its checksums.
+
+**Quick install (not for production hosts).** The command below runs the script that
+cosigner.fystack.io serves, before anything is verified. The installer's own checks cover only the binary
+it downloads, not the script itself, so this trusts the web host, its DNS and its CDN:
+
+```bash
+curl -sSL https://cosigner.fystack.io/install.sh | sh -s -- --version v1.2.3
 ```
 
 Or build from source (Go 1.26+):

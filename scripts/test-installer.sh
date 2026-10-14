@@ -117,4 +117,36 @@ for pair in Linux:x86_64:linux:amd64 Linux:aarch64:linux:arm64 Darwin:x86_64:dar
   [[ "$got " == "$want" ]] || fail "detect_platform $kernel/$machine: got '$got', want '$want'"
 done
 echo "ok   detect_platform"
+
+# --- --version hands over only to a signed installer -----------------------------
+# Stub curl serves another release's installer that leaves a marker when it runs;
+# stub cosign accepts or rejects its signature.
+handover() { # name verify-exit-code expect(ran|refused)
+  local bin="$WORK/handover-$1" mark="$WORK/handover-$1.ran" out status=0
+  mkdir "$bin" "$bin-dir"
+  cat > "$bin/curl" <<'EOF'
+#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in --output) out="$2"; shift 2 ;; *) url="$1"; shift ;; esac
+done
+case "$url" in
+  */v1.0.0/install.sh) printf '#!/bin/sh\ntouch "$HANDOVER_MARK"\n' > "$out" ;;
+  */v1.0.0/install.sh.sigstore.json) echo '{}' > "$out" ;;
+  *) exit 22 ;;
+esac
+EOF
+  printf '#!/bin/sh\ncase "$1" in version) echo "GitVersion: v3.1.3";; verify-blob) exit %s;; esac\n' "$2" > "$bin/cosign"
+  chmod +x "$bin/curl" "$bin/cosign"
+  out="$(PATH="$bin:$PATH" HANDOVER_MARK="$mark" COSIGNER_INSTALL_DIR="$bin-dir" \
+    "$DASH" "$INSTALLER" --version v1.0.0 --skip-docker-check 2>&1)" || status=$?
+  case "$3" in
+    ran) [[ $status -eq 0 && -e "$mark" ]] || fail "handover $1: signed installer did not run (status $status):"$'\n'"$out" ;;
+    refused) [[ $status -ne 0 && ! -e "$mark" ]] || fail "handover $1: unsigned installer ran (status $status):"$'\n'"$out" ;;
+  esac
+  echo "ok   handover: $1"
+}
+handover signed 0 ran
+handover unsigned 1 refused
+
 echo "installer tests passed"

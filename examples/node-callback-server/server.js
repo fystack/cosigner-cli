@@ -18,6 +18,11 @@ app.post("/cosigner/approve", express.text({ type: "application/jwt", limit: "51
     console.log("Cosigner request:", JSON.stringify(request, null, 2));
 
     let decision = { action: "approve" };
+    // A re-share with local_veto_lost moves the wallet to a committee that can sign
+    // without this cosigner, for good. Reject it unless you expect exactly that change.
+    if (request.local_veto_lost) {
+      decision = { action: "reject", reason: "re-share would let the new committee sign without this cosigner" };
+    }
     // Your approval logic goes here. For example:
     //   if (request.signing_context?.tx?.decoded?.to_address !== ALLOWED_ADDRESS) {
     //     decision = { action: "reject", reason: "destination not allowed" };
