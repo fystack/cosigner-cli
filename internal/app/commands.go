@@ -466,8 +466,9 @@ func (a *App) startService(ctx context.Context, docker string, l layout, s Setti
 			return err
 		}
 	}
-	// The digest was signature-verified when it was installed and is content
-	// addressed, so startup only rechecks the runtime contract (offline).
+	// up, update and restore verify the digest's signature before they record
+	// it, and the digest is content addressed, so startup only rechecks the
+	// runtime contract (offline).
 	if _, err := a.runtimeCapabilities(ctx, docker, s.Image); err != nil {
 		return err
 	}

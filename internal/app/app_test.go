@@ -310,7 +310,111 @@ func TestRecoveryRestoresIdentityIntoEmptyHome(t *testing.T) {
 	cmd = a.Command()
 	cmd.SetArgs([]string{"--home", target, "restore", "--in", archive})
 	require.ErrorContains(t, cmd.Execute(), "empty instance")
-	require.Empty(t, r.calls, "restore must never start a container")
+	for _, call := range r.calls {
+		require.Equal(t, "cosign", call.name, "restore must never start a container")
+	}
+}
+
+// sealedArchive writes bundle as an archive a valid recovery password opens,
+// like one made on a host the attacker controlled.
+func sealedArchive(t *testing.T, bundle recoveryBundle, password string) string {
+	t.Helper()
+	plain, err := json.Marshal(bundle)
+	require.NoError(t, err)
+	blob, err := sealRecovery([]byte(password), plain)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "instance.backup")
+	require.NoError(t, os.WriteFile(path, blob, 0600))
+	return path
+}
+
+func recoveryPasswordEnv(password string) func(string) string {
+	return func(k string) string {
+		if k == "COSIGNER_RECOVERY_PASSWORD" {
+			return password
+		}
+		return ""
+	}
+}
+
+func TestBackupLeavesComposeFileOutOfArchive(t *testing.T) {
+	a := newTestApp(&fakeRunner{})
+	l, s := fixture(t, a)
+	bundle, err := snapshotInstallation(l, s)
+	require.NoError(t, err)
+	for _, f := range bundle.Files {
+		require.NotEqual(t, "docker-compose.yaml", f.Path)
+	}
+	require.NoError(t, validateBundle(bundle))
+}
+
+// CLI-1: whoever made the archive must not decide what runs on the new host.
+func TestRestoreRegeneratesComposeAndIgnoresArchivedDockerCommand(t *testing.T) {
+	r := &fakeRunner{}
+	a := newTestApp(r)
+	l, s := fixture(t, a)
+	malicious := "services:\n  cosigner:\n    image: attacker\n    volumes: [\"/:/host\"]\n"
+	require.NoError(t, os.WriteFile(l.compose(), []byte(malicious), 0600))
+	s.Docker = "/tmp/attacker-docker"
+	require.NoError(t, saveSettings(l.home, s))
+	bundle, err := snapshotInstallation(l, s)
+	require.NoError(t, err)
+	// Archives from older CLIs, or tampered ones, still carry a compose file.
+	sum := sha256.Sum256([]byte(malicious))
+	bundle.Files = append(bundle.Files, recoveryFile{"docker-compose.yaml", hex.EncodeToString(sum[:]), []byte(malicious)})
+	archive := sealedArchive(t, bundle, "pw")
+
+	target := t.TempDir()
+	a.Getenv = recoveryPasswordEnv("pw")
+	cmd := a.Command()
+	cmd.SetArgs([]string{"--home", target, "restore", "--in", archive})
+	require.NoError(t, cmd.Execute())
+
+	template, err := templates.ReadFile("docker-compose.yaml")
+	require.NoError(t, err)
+	restored, err := os.ReadFile(filepath.Join(target, "docker-compose.yaml"))
+	require.NoError(t, err)
+	require.Equal(t, template, restored)
+	settings, err := loadSettings(target)
+	require.NoError(t, err)
+	require.Equal(t, "docker", settings.Docker)
+}
+
+// CLI-2: the archive's image must pass the same signature check as up and update.
+func TestRestoreVerifiesArchivedImageSignature(t *testing.T) {
+	untrusted := "untrusted.example.invalid/cosigner@sha256:" + strings.Repeat("b", 64)
+	r := &fakeRunner{run: func(c runCall) ([]byte, error) {
+		if c.name == "cosign" && c.args[0] == "verify" {
+			return []byte("no matching signatures"), errors.New("exit status 1")
+		}
+		return nil, nil
+	}}
+	a := newTestApp(r)
+	l, s := fixture(t, a)
+	s.Image = untrusted
+	require.NoError(t, saveSettings(l.home, s))
+	bundle, err := snapshotInstallation(l, s)
+	require.NoError(t, err)
+	archive := sealedArchive(t, bundle, "pw")
+
+	target := t.TempDir()
+	a.Getenv = recoveryPasswordEnv("pw")
+	cmd := a.Command()
+	cmd.SetArgs([]string{"--home", target, "restore", "--in", archive})
+	require.ErrorContains(t, cmd.Execute(), "image signature verification failed")
+
+	var verified []string
+	for _, c := range r.calls {
+		if c.name == "cosign" && c.args[0] == "verify" {
+			verified = append(verified, c.args[len(c.args)-1])
+		}
+	}
+	require.Equal(t, []string{untrusted}, verified)
+	entries, err := os.ReadDir(target)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		require.Equal(t, ".cosigner-cli.lock", entry.Name(), "a refused archive must publish nothing")
+	}
 }
 func TestRecoveryRejectsTamperingTraversalAndRunningDatabase(t *testing.T) {
 	a := newTestApp(&fakeRunner{})
