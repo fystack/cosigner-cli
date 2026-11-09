@@ -25,7 +25,7 @@ import (
 
 const (
 	DefaultApexEndpoint = "https://api.enterprise-sandbox.fystack.io"
-	// ProductionApexEndpoint is listed in the setup menu but not selectable yet.
+	// ProductionApexEndpoint is offered as an environment in the setup menu.
 	ProductionApexEndpoint = "https://api.fystack.io"
 	defaultTokenMax        = 4096
 	operatorSchema         = 2
