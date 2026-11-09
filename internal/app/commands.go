@@ -206,18 +206,25 @@ func (a *App) promptEndpoint(defaultValue string) (string, error) {
 	if !ok || !isTerminal(file) {
 		return defaultValue, nil
 	}
-	const custom = 2
+	const (
+		sandbox = iota
+		production
+		custom
+	)
 	options := []menuOption{
-		{Label: fmt.Sprintf("Sandbox      %s", defaultValue)},
-		{Label: fmt.Sprintf("Production   %s  (coming soon)", ProductionApexEndpoint), Disabled: true},
-		{Label: "Custom endpoint"},
+		sandbox:    {Label: fmt.Sprintf("Sandbox      %s", defaultValue)},
+		production: {Label: fmt.Sprintf("Production   %s", ProductionApexEndpoint)},
+		custom:     {Label: "Custom endpoint"},
 	}
 	choice, err := a.choose(file, "Fystack environment", options)
 	if err != nil {
 		return "", fmt.Errorf("read Fystack environment: %w", err)
 	}
-	if choice != custom {
+	switch choice {
+	case sandbox:
 		return defaultValue, nil
+	case production:
+		return ProductionApexEndpoint, nil
 	}
 	for {
 		fmt.Fprint(a.Out, "Custom endpoint: ")
