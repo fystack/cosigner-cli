@@ -624,16 +624,6 @@ func TestUpdateWithoutVersionUsesNewestRelease(t *testing.T) {
 	require.Empty(t, r.calls)
 }
 
-func TestUpdateRequiresBackupBeforePulling(t *testing.T) {
-	r := &fakeRunner{}
-	a := newTestApp(r)
-	l, _ := fixture(t, a)
-	cmd := a.Command()
-	cmd.SetArgs([]string{"--home", l.home, "update", "--version", "1.2.4"})
-	require.ErrorContains(t, cmd.Execute(), "--backup-out")
-	require.Empty(t, r.calls)
-}
-
 func TestStartupChecksContractWithoutReverifyingSignature(t *testing.T) {
 	r := &fakeRunner{run: func(c runCall) ([]byte, error) {
 		if c.name == "cosign" {

@@ -165,10 +165,17 @@ cosigner-cli logs -f
 | `backup`  | Encrypted backup of the instance (must be stopped)              |
 | `restore` | Restore a backup into an empty directory                        |
 | `export`  | Write `.mshare` files for Fystack Recovery (must be stopped)    |
-| `update`  | Verify and install a newer release                              |
-| `version` | Print CLI and runtime versions                                  |
+| `update`  | Update the **runtime** (container image) to a newer signed release |
+| `self-update` | Update **cosigner-cli** itself to a newer signed release    |
+| `version` | Print CLI and runtime versions (`--check` looks up the newest)  |
+| `help environment` | List every environment variable the CLI reads          |
 
 Global flags: `--home DIR` (or `COSIGNER_HOME`), `--docker CMD`.
+
+For scripts and agents: `version`, `doctor`, `update` and `self-update` take `--json` (the
+document goes to stdout, progress to stderr). `update --check` and `self-update --check` exit
+with status `10` when a newer release exists. Commands never prompt without a terminal: they
+fail, and a `hint:` line names the flag or variable to set (for example `--yes`).
 
 ## Approval callback
 
@@ -236,7 +243,7 @@ COSIGNER_PASSWORD_FD=3 cosigner-cli start 3< /run/secrets/cosigner-pw
 | Variable                        | Used by           |
 | ------------------------------- | ----------------- |
 | `COSIGNER_PASSWORD_FD`          | storage password  |
-| `COSIGNER_RECOVERY_PASSWORD_FD` | `backup`/`restore` |
+| `COSIGNER_RECOVERY_PASSWORD_FD` | `backup`/`restore`/`update` |
 
 `COSIGNER_PASSWORD` / `COSIGNER_RECOVERY_PASSWORD` also work but leak into the environment. Avoid them.
 
@@ -244,16 +251,19 @@ COSIGNER_PASSWORD_FD=3 cosigner-cli start 3< /run/secrets/cosigner-pw
 
 ```bash
 cosigner-cli stop
-cosigner-cli backup --out /secure/backups/cosigner.enc
+cosigner-cli backup                               # -> ./backups/backup-<version>-<time>.enc
 cosigner-cli export --out-dir /secure/exports     # --list to see wallets, --wallet ID to pick
 cosigner-cli start
 ```
 
 - `backup` asks for a separate **recovery password**. Store the archive and the password in different places.
+- Archives go to `<home>/backups/` unless you pass `--out PATH` or set `COSIGNER_BACKUP_DIR`. Backups never
+  include that folder. A copy on the instance's own disk is lost with the disk, so copy archives off-host.
+  Inside the instance, only `backups/` may hold archives.
 - `export` prints a six-word passphrase once. Store it apart from the `.mshare` files.
 - Backup size limit: 128 MiB of data.
 
-Restore into a new, empty directory:
+Restore into a new, empty directory (it may already contain a `backups/` folder holding the archive):
 
 ```bash
 cosigner-cli --home /srv/cosigner-restored restore --in /secure/backups/cosigner.enc
@@ -265,16 +275,49 @@ cosigner-cli --home /srv/cosigner-restored restore --in /secure/backups/cosigner
 
 ## Update
 
+Two things get updated, each with its own command and version number:
+
+| What | Command | Released from |
+| --- | --- | --- |
+| The **runtime**: the container that holds the key shares and signs | `cosigner-cli update` | `ghcr.io/fystack/cosigner` |
+| **cosigner-cli**: this tool | `cosigner-cli self-update` | GitHub releases of this repository |
+
+`cosigner-cli version --check` shows both, with the newest release of each.
+
+### Runtime
+
 ```bash
-cosigner-cli update --dry-run                                    # preview
-cosigner-cli update --backup-out /secure/backups/pre-update.enc  # install newest
-cosigner-cli update --version v1.2.3 --backup-out ...            # pin a version
+cosigner-cli update --dry-run                                    # verify and preview the newest release
+cosigner-cli update                                              # checkpoint to ./backups/, then install
+cosigner-cli update --backup-out /secure/backups/pre-update.enc  # checkpoint somewhere else
+cosigner-cli update --version v1.2.3 --yes                       # pin a version, no prompt (scripts)
+cosigner-cli update --check                                      # exit 10 when an update exists
 ```
 
-- Requires a newer release, a valid signature and a compatible runtime contract.
-- Always takes an encrypted checkpoint first. There is no automatic rollback.
+- Requires a newer release, a valid signature and a compatible runtime contract. If the runtime
+  needs a newer CLI, `update` says so: run `self-update` first.
+- Shows the plan (installed version, candidate version, checkpoint path, downtime) and asks before
+  it stops anything. Without a terminal, pass `--yes`.
+- Always takes an encrypted checkpoint first, in `<home>/backups/pre-update-<from>-to-<to>-<time>.enc`
+  by default. There is no automatic rollback. Afterwards it prints the restore command for that checkpoint.
+- Signing pauses from the stop until the new runtime is ready.
 - Pulls from the registry the instance was installed from. Switch with `--repository ghcr.io/fystack/cosigner`.
-- `start`, `restart`, `status` and `doctor` tell you when a new release exists. Disable with `COSIGNER_NO_UPDATE_CHECK=1`.
+
+### cosigner-cli
+
+```bash
+cosigner-cli self-update            # newest release
+sudo cosigner-cli self-update       # when the binary is in a root-owned directory such as /usr/local/bin
+cosigner-cli self-update --check    # exit 10 when an update exists
+```
+
+`self-update` downloads the release binary for this platform and verifies it with cosign against
+this repository's release workflow for that tag. That's the same check `install.sh` makes, and it
+runs even with `COSIGNER_SKIP_IMAGE_SIGNATURE_VERIFICATION=1`. The binary is replaced atomically
+only once it reports the expected version. The running Cosigner is not touched.
+
+`start`, `restart`, `status` and `doctor` tell you when a new runtime or CLI release exists, naming
+which one. Disable with `COSIGNER_NO_UPDATE_CHECK=1`.
 
 ## Security notes
 
