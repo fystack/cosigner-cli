@@ -80,31 +80,44 @@ func (execRunner) Stream(ctx context.Context, name string, args []string, input 
 }
 
 type App struct {
-	password        []byte
-	In              io.Reader
-	Out, Err        io.Writer
-	Getenv          func(string) string
-	Runner          Runner
-	Random          io.Reader
-	Tags            func(ctx context.Context, repository string) ([]string, error)
+	password []byte
+	In       io.Reader
+	Out, Err io.Writer
+	Getenv   func(string) string
+	Runner   Runner
+	Random   io.Reader
+	Tags     func(ctx context.Context, repository string) ([]string, error)
+	// LatestCLI returns the newest stable cosigner-cli release tag.
+	LatestCLI func(ctx context.Context) (string, error)
+	// Fetch downloads an HTTPS URL, failing beyond max bytes.
+	Fetch func(ctx context.Context, url string, max int64) ([]byte, error)
+	// Executable is the path of the running cosigner-cli, replaced by self-update.
+	Executable      func() (string, error)
 	Version, Commit string
 }
 
 func New() *App {
-	return &App{In: os.Stdin, Out: os.Stdout, Err: os.Stderr, Getenv: os.Getenv, Runner: execRunner{}, Random: rand.Reader, Tags: registryTags, Version: "dev", Commit: "dev"}
+	return &App{In: os.Stdin, Out: os.Stdout, Err: os.Stderr, Getenv: os.Getenv, Runner: execRunner{}, Random: rand.Reader, Tags: registryTags, LatestCLI: githubLatestRelease, Fetch: httpsFetch, Executable: os.Executable, Version: "dev", Commit: "dev"}
 }
 func (a *App) Command() *cobra.Command {
-	root := &cobra.Command{Use: "cosigner-cli", Short: "Manage a Cosigner installation", SilenceUsage: true, SilenceErrors: true}
+	root := &cobra.Command{Use: "cosigner-cli", Short: "Manage a Cosigner installation", Long: `cosigner-cli installs and runs the Cosigner runtime: the container that holds your
+key shares and signs. The CLI and the runtime are released and versioned separately:
+
+  cosigner-cli version       show both versions (--check looks up the newest)
+  cosigner-cli update        update the runtime (container image)
+  cosigner-cli self-update   update this CLI
+
+Run "cosigner-cli help environment" for the environment variables it reads.`, SilenceUsage: true, SilenceErrors: true}
 	root.SetIn(a.In)
 	root.SetOut(a.Out)
 	root.SetErr(a.Err)
 	root.PersistentFlags().String("home", "", "Instance directory (default: current directory)")
 	root.PersistentFlags().String("docker", "", "Docker command")
-	root.AddCommand(a.setupCommand(), a.startCommand(), a.stopCommand(), a.restartCommand(), a.statusCommand(), a.logsCommand(), a.doctorCommand(), a.infoCommand(), a.backupCommand(), a.restoreCommand(), a.exportCommand(), a.updateCommand(), a.callbackCommand(), a.versionCommand())
+	root.AddCommand(a.setupCommand(), a.startCommand(), a.stopCommand(), a.restartCommand(), a.statusCommand(), a.logsCommand(), a.doctorCommand(), a.infoCommand(), a.backupCommand(), a.restoreCommand(), a.exportCommand(), a.updateCommand(), a.selfUpdateCommand(), a.callbackCommand(), a.versionCommand(), environmentHelp())
 	for _, cmd := range root.Commands() {
 		cmd.Args = cobra.NoArgs
 		switch cmd.Name() {
-		case "version", "logs", "status", "info", "doctor":
+		case "version", "logs", "status", "info", "doctor", "self-update":
 		default:
 			if cmd.RunE != nil {
 				cmd.RunE = a.withInstance(cmd.RunE)

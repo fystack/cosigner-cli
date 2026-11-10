@@ -34,6 +34,10 @@ const (
 	passphraseCheckWords = 3
 )
 
+// errNoPasswordInput means a password was needed but there is no terminal and
+// no environment variable to read it from.
+var errNoPasswordInput = errors.New(passwordEnv + " is required in non-interactive mode")
+
 // encryptedKEK is an encrypted, versioned representation of the hex storage
 // KEK. It deliberately contains KDF parameters and salt, but never a password
 // or derived key.
@@ -87,7 +91,7 @@ func (a *App) readPassword(confirm bool) (result []byte, resultErr error) {
 	}
 	file, ok := a.In.(*os.File)
 	if !ok || !isTerminal(file) {
-		return nil, fmt.Errorf("%s is required in non-interactive mode", passwordEnv)
+		return nil, withHint(errNoPasswordInput, "pass it on an open descriptor, for example COSIGNER_PASSWORD_FD=3 3<passphrase-file, or set %s", passwordEnv)
 	}
 	for {
 		fmt.Fprint(a.Out, "Storage encryption passphrase: ")

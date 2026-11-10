@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -43,18 +44,44 @@ func (a *App) newestRelease(ctx context.Context, repository string) (string, err
 }
 
 // notifyUpdate is best-effort and never blocks or fails the calling command.
+// It names the component, because the CLI and the runtime are versioned and
+// updated separately.
 func (a *App) notifyUpdate(ctx context.Context, s Settings) {
-	if a.Tags == nil || a.Getenv("COSIGNER_NO_UPDATE_CHECK") == "1" {
+	if a.Getenv("COSIGNER_NO_UPDATE_CHECK") == "1" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	repository, _, _ := strings.Cut(s.Image, "@")
-	newest, err := a.newestRelease(ctx, repository)
-	if err != nil || !stableVersionAfter(newest, s.RuntimeVersion) {
-		return
+	runtimeLatest, cliLatest := a.latestReleases(ctx, s)
+	if runtimeLatest != "" && stableVersionAfter(runtimeLatest, s.RuntimeVersion) {
+		fmt.Fprintf(a.Err, "==> Runtime update available: %s → %s (run `cosigner-cli update`)\n", vtag(s.RuntimeVersion), vtag(runtimeLatest))
 	}
-	fmt.Fprintf(a.Err, "==> Update available: v%s → v%s (run `cosigner-cli update`)\n", strings.TrimPrefix(s.RuntimeVersion, "v"), strings.TrimPrefix(newest, "v"))
+	if cliLatest != "" && stableVersionAfter(cliLatest, a.Version) {
+		fmt.Fprintf(a.Err, "==> cosigner-cli update available: %s → %s (run `cosigner-cli self-update`)\n", vtag(a.Version), vtag(cliLatest))
+	}
+}
+
+// latestReleases looks up the newest runtime (for an installed instance) and
+// CLI releases in parallel. A lookup that fails returns an empty string.
+func (a *App) latestReleases(ctx context.Context, s Settings) (runtimeLatest, cliLatest string) {
+	var wg sync.WaitGroup
+	if a.Tags != nil && s.Image != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			repository, _, _ := strings.Cut(s.Image, "@")
+			runtimeLatest, _ = a.newestRelease(ctx, repository)
+		}()
+	}
+	if a.LatestCLI != nil && releaseVersion.MatchString(a.Version) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cliLatest, _ = a.LatestCLI(ctx)
+		}()
+	}
+	wg.Wait()
+	return runtimeLatest, cliLatest
 }
 
 // registryTags lists tags through the OCI distribution API, fetching an

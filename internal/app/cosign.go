@@ -15,6 +15,12 @@ func (a *App) cosignOK(ctx context.Context) error {
 	if a.Getenv("COSIGNER_SKIP_IMAGE_SIGNATURE_VERIFICATION") == "1" {
 		return nil
 	}
+	return a.cosignInstalled(ctx)
+}
+
+// cosignInstalled checks for cosign regardless of the development skip switch;
+// self-update uses it because a CLI binary is never run unverified.
+func (a *App) cosignInstalled(ctx context.Context) error {
 	err := a.step("Checking Cosign", func() (string, error) {
 		raw, err := a.Runner.Run(ctx, "cosign", []string{"version"}, nil, nil)
 		if v := cosignVersion.FindSubmatch(raw); v != nil {

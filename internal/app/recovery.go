@@ -49,7 +49,11 @@ func (a *App) recoveryPassword(confirm bool) ([]byte, error) {
 		return ""
 	}
 	a.progress("Enter the separate recovery password (retain it outside this host).")
-	return copy.readPassword(confirm)
+	password, err := copy.readPassword(confirm)
+	if errors.Is(err, errNoPasswordInput) {
+		return nil, withHint(errors.New("COSIGNER_RECOVERY_PASSWORD is required in non-interactive mode"), "pass it on an open descriptor, for example COSIGNER_RECOVERY_PASSWORD_FD=3 3<recovery-password-file, or set COSIGNER_RECOVERY_PASSWORD")
+	}
+	return password, err
 }
 
 func sealRecovery(password, plaintext []byte) ([]byte, error) {
@@ -210,12 +214,11 @@ func (a *App) backupCommand() *cobra.Command {
 			return errors.New("stop the runtime before backup")
 		}
 		path, _ := c.Flags().GetString("out")
-		path, err = filepath.Abs(path)
-		if err != nil {
-			return err
+		if path == "" {
+			path = a.defaultArchive(l, "backup-"+vtag(s.RuntimeVersion))
 		}
-		if rel, err := filepath.Rel(l.home, path); err != nil || filepath.IsLocal(rel) {
-			return errors.New("write recovery archives outside the instance directory")
+		if path, err = archiveDestination(l, path); err != nil {
+			return err
 		}
 		password, err := a.recoveryPassword(true)
 		if err != nil {
@@ -226,11 +229,83 @@ func (a *App) backupCommand() *cobra.Command {
 			return err
 		}
 		fmt.Fprintf(a.Out, "Verified encrypted recovery archive: %s\nKeep the recovery password and storage unlock credentials separately.\n", path)
+		a.warnIfOnHost(l, path)
 		return nil
 	}}
-	c.Flags().String("out", "", "Output archive outside the instance directory")
-	_ = c.MarkFlagRequired("out")
+	c.Flags().String("out", "", "Output archive (default: <home>/backups/backup-<version>-<time>.enc, or COSIGNER_BACKUP_DIR)")
 	return c
+}
+
+// backupDir is the one folder inside an instance that may hold recovery
+// archives. Snapshots only read config, settings, state/ and secrets/, so
+// archives here are never captured into later archives.
+const backupDir = "backups"
+
+// defaultArchive names a new archive in COSIGNER_BACKUP_DIR or <home>/backups/.
+// The UTC timestamp keeps names unique, since archives are never overwritten.
+func (a *App) defaultArchive(l layout, name string) string {
+	dir := a.Getenv("COSIGNER_BACKUP_DIR")
+	if dir == "" {
+		dir = filepath.Join(l.home, backupDir)
+	}
+	return filepath.Join(dir, name+"-"+time.Now().UTC().Format("20060102T150405Z")+".enc")
+}
+
+// archiveDestination resolves where an archive may be written: outside the
+// instance, or inside its backups/ folder. Symlinks are resolved first, so a
+// backups/ link into state/ is refused like state/ itself.
+func archiveDestination(l layout, path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := resolveExisting(abs)
+	if err != nil {
+		return "", err
+	}
+	home, err := resolveExisting(l.home)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(home, resolved)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsLocal(rel) {
+		return resolved, nil
+	}
+	if first, rest, _ := strings.Cut(filepath.ToSlash(rel), "/"); first == backupDir && rest != "" {
+		return resolved, nil
+	}
+	return "", withHint(fmt.Errorf("%s is inside the instance directory; recovery archives go outside it or in its %s/ folder", resolved, backupDir), "leave out the path to use %s", filepath.Join(l.home, backupDir))
+}
+
+// resolveExisting evaluates symlinks in the longest existing prefix of path.
+func resolveExisting(path string) (string, error) {
+	rest := ""
+	for p := path; ; {
+		real, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			return filepath.Join(real, rest), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return path, nil
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
+}
+
+// warnIfOnHost reminds operators that an archive inside the instance shares
+// its disk: it undoes a bad update, but does not survive losing the host.
+func (a *App) warnIfOnHost(l layout, path string) {
+	if rel, err := filepath.Rel(l.home, path); err == nil && filepath.IsLocal(rel) {
+		a.warn("This archive is on the same host as the instance. Copy it off-host; it does not survive losing this disk.")
+	}
 }
 func (a *App) restoreCommand() *cobra.Command {
 	c := &cobra.Command{Use: "restore", Short: "Restore an encrypted backup into an empty directory", RunE: func(c *cobra.Command, _ []string) error {
@@ -243,7 +318,8 @@ func (a *App) restoreCommand() *cobra.Command {
 			return err
 		}
 		for _, entry := range entries {
-			if entry.Name() != ".cosigner-cli.lock" {
+			// backups/ may hold the very archive being restored.
+			if entry.Name() != ".cosigner-cli.lock" && !(entry.Name() == backupDir && entry.IsDir()) {
 				return errors.New("restore requires an empty instance directory; existing state is never overwritten")
 			}
 		}

@@ -612,8 +612,23 @@ func (a *App) logsCommand() *cobra.Command {
 	c.Flags().BoolP("follow", "f", false, "Follow logs")
 	return c
 }
+
+// doctorReport is the JSON shape of `doctor --json`. Failed checks are errors
+// (non-zero exit, message on stderr), not report fields.
+type doctorReport struct {
+	State          string `json:"state"`
+	Profile        string `json:"profile,omitempty"`
+	Image          string `json:"image,omitempty"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	CLIVersion     string `json:"cli_version"`
+}
+
 func (a *App) doctorCommand() *cobra.Command {
-	return &cobra.Command{Use: "doctor", Short: "Check Docker, configuration, and installation state", RunE: func(c *cobra.Command, _ []string) error {
+	c := &cobra.Command{Use: "doctor", Short: "Check Docker, configuration, and installation state", RunE: func(c *cobra.Command, _ []string) error {
+		asJSON, _ := c.Flags().GetBool("json")
+		emit, restore := a.jsonMode(asJSON)
+		defer restore()
+		report := doctorReport{CLIVersion: a.Version}
 		home, err := a.home(c)
 		if err != nil {
 			return err
@@ -629,11 +644,13 @@ func (a *App) doctorCommand() *cobra.Command {
 		}
 		if !fileExists(l.config) {
 			fmt.Fprintln(a.Out, "State: unconfigured")
-			return nil
+			report.State = "unconfigured"
+			return emit(report)
 		}
 		if !fileExists(l.pairing()) {
 			fmt.Fprintln(a.Out, "State: configured but unpaired")
-			return nil
+			report.State = "unpaired"
+			return emit(report)
 		}
 		if err := validatePaired(l, s); err != nil {
 			return err
@@ -655,11 +672,14 @@ func (a *App) doctorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Out, "profile: %s\nimage: %s\nruntime_version: %s\n", s.Profile, s.Image, caps.Version)
+		fmt.Fprintf(a.Out, "profile: %s\nimage: %s\nruntime_version: %s\ncli_version: %s\n", s.Profile, s.Image, caps.Version, a.Version)
 		fmt.Fprintln(a.Out, "State: paired (run `cosigner-cli status` for container state)")
 		a.notifyUpdate(c.Context(), s)
-		return nil
+		report.State, report.Profile, report.Image, report.RuntimeVersion = "paired", s.Profile, s.Image, vtag(caps.Version)
+		return emit(report)
 	}}
+	c.Flags().Bool("json", false, "Print the result as JSON on stdout; progress goes to stderr")
+	return c
 }
 func (a *App) infoCommand() *cobra.Command {
 	return &cobra.Command{Use: "info", Short: "Print public Cosigner identity", RunE: func(c *cobra.Command, _ []string) error {
@@ -708,10 +728,4 @@ func (a *App) waitReady(ctx context.Context, docker string, l layout, s Settings
 		case <-ticker.C:
 		}
 	}
-}
-func (a *App) versionCommand() *cobra.Command {
-	return &cobra.Command{Use: "version", Short: "Print host and runtime build identity", RunE: func(*cobra.Command, []string) error {
-		fmt.Fprintf(a.Out, "cosigner-cli %s (commit %s)\n", a.Version, a.Commit)
-		return nil
-	}}
 }
